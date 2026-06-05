@@ -1,131 +1,15 @@
-<!doctype html>
-<html lang="zh-CN">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <title>场景相机</title>
-  <meta name="theme-color" content="#0b1020" />
-  <meta name="apple-mobile-web-app-capable" content="yes" />
-  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-  <meta name="apple-mobile-web-app-title" content="场景相机" />
-  <link rel="manifest" href="./manifest.webmanifest" />
-  <link rel="apple-touch-icon" href="./icons/icon-192.png" />
-  <link rel="stylesheet" href="./styles.css" />
-</head>
-<body>
-  <header class="app-header">
-    <div class="brand">
-      <div class="brand-icon" aria-hidden="true">📷</div>
-      <div class="brand-copy">
-        <h1>场景相机</h1>
-        <p id="storageLine">正在检查存储状态…</p>
-      </div>
-    </div>
-    <button id="settingsBtn" class="icon-button" aria-label="设置">设置</button>
-  </header>
-
-  <main class="app-shell">
-    <section class="hero-card" aria-label="当前分类">
-      <div>
-        <p class="eyebrow">当前分类</p>
-        <h2 id="currentFolderTitle">全部分类</h2>
-        <p id="currentFolderMeta" class="muted-line">0 个子分类 · 0 张照片</p>
-      </div>
-      <button id="captureBtn" class="primary capture-main">拍照</button>
-    </section>
-
-    <section class="status-grid" aria-label="数据状态">
-      <div class="stat synced-card"><strong id="statPhotos">0</strong><span>本地照片</span></div>
-      <div class="stat pending-card"><strong id="statPending">0</strong><span>待同步</span></div>
-      <div class="stat failed-card"><strong id="statFailed">0</strong><span>失败</span></div>
-      <div class="stat trash-card"><strong id="statTrash">0</strong><span>回收站</span></div>
-    </section>
-
-    <section class="action-panel" aria-label="常用操作">
-      <button id="newFolderBtn">新建分类</button>
-      <button id="syncBtn">同步</button>
-      <button id="exportBtn">导出 ZIP</button>
-      <label class="buttonLike">
-        导入 ZIP
-        <input id="importInput" type="file" accept=".zip,application/zip" hidden />
-      </label>
-    </section>
-
-    <section class="notice" id="noticeBox" hidden></section>
-
-    <section class="content-card path-card">
-      <div class="section-title-row">
-        <div>
-          <p class="eyebrow">位置</p>
-          <h3>分类路径</h3>
-        </div>
-      </div>
-      <nav id="breadcrumbs" class="breadcrumbs"></nav>
-    </section>
-
-    <section class="content-card">
-      <div class="section-title-row">
-        <div>
-          <p class="eyebrow">Folders</p>
-          <h3>子分类</h3>
-        </div>
-        <span id="folderCount" class="pill">0 个</span>
-      </div>
-      <div id="folderList" class="folder-list"></div>
-    </section>
-
-    <section class="content-card photo-section">
-      <div class="section-title-row">
-        <div>
-          <p class="eyebrow">Photos</p>
-          <h3>照片</h3>
-        </div>
-        <span id="photoCount" class="pill">0 张</span>
-      </div>
-      <div id="photoGrid" class="photo-grid"></div>
-    </section>
-  </main>
-
-  <input id="cameraInput" type="file" accept="image/*" capture="environment" hidden />
-
-  <dialog id="settingsDialog">
-    <form method="dialog" class="dialog-card">
-      <div class="dialog-header">
-        <div>
-          <p class="eyebrow">Settings</p>
-          <h2>同步设置</h2>
-        </div>
-      </div>
-      <label>
-        Cloudflare Worker 地址
-        <input id="apiBaseInput" placeholder="https://你的-worker.workers.dev" autocomplete="off" />
-      </label>
-      <label>
-        App 密码
-        <input id="appPasswordInput" type="password" placeholder="Worker 里的 APP_PASSWORD" autocomplete="current-password" />
-      </label>
-      <p class="hint">密码只保存在这台设备的浏览器本地。真正的 GitHub Token 只放在 Cloudflare Worker Secret 里。</p>
-      <menu>
-        <button value="cancel">取消</button>
-        <button id="saveSettingsBtn" value="default" class="primary">保存</button>
-      </menu>
-    </form>
-  </dialog>
-
-  <dialog id="photoDialog" class="photo-dialog">
-    <form method="dialog" class="dialog-card photo-dialog-card">
-      <img id="photoPreview" alt="照片预览" />
-      <textarea id="photoNote" placeholder="备注，可选"></textarea>
-      <p id="photoMeta" class="hint"></p>
-      <menu>
-        <button id="saveNoteBtn" value="default">保存备注</button>
-        <button id="deletePhotoBtn" value="default" class="danger">删除</button>
-        <button value="cancel">关闭</button>
-      </menu>
-    </form>
-  </dialog>
-
-  <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js" defer></script>
-  <script src="./app.js" type="module"></script>
-</body>
-</html>
+{
+  "name": "场景相机",
+  "short_name": "场景相机",
+  "description": "按分类拍照，本地保存并同步到 GitHub 私有仓库。",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#111827",
+  "theme_color": "#111827",
+  "orientation": "portrait",
+  "icons": [
+    { "src": "./icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable" },
+    { "src": "./icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}

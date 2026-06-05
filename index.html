@@ -1,790 +1,131 @@
-const DB_NAME = 'scene-camera-db';
-const DB_VERSION = 1;
-const ROOT_ID = 'root';
-const MAX_THUMBNAIL = 480;
-
-const $ = (id) => document.getElementById(id);
-const els = {
-  storageLine: $('storageLine'),
-  settingsBtn: $('settingsBtn'),
-  newFolderBtn: $('newFolderBtn'),
-  captureBtn: $('captureBtn'),
-  syncBtn: $('syncBtn'),
-  exportBtn: $('exportBtn'),
-  importInput: $('importInput'),
-  cameraInput: $('cameraInput'),
-  breadcrumbs: $('breadcrumbs'),
-  folderList: $('folderList'),
-  photoGrid: $('photoGrid'),
-  noticeBox: $('noticeBox'),
-  statPhotos: $('statPhotos'),
-  statPending: $('statPending'),
-  statFailed: $('statFailed'),
-  statTrash: $('statTrash'),
-  currentFolderTitle: $('currentFolderTitle'),
-  currentFolderMeta: $('currentFolderMeta'),
-  folderCount: $('folderCount'),
-  photoCount: $('photoCount'),
-  settingsDialog: $('settingsDialog'),
-  apiBaseInput: $('apiBaseInput'),
-  appPasswordInput: $('appPasswordInput'),
-  saveSettingsBtn: $('saveSettingsBtn'),
-  photoDialog: $('photoDialog'),
-  photoPreview: $('photoPreview'),
-  photoNote: $('photoNote'),
-  photoMeta: $('photoMeta'),
-  saveNoteBtn: $('saveNoteBtn'),
-  deletePhotoBtn: $('deletePhotoBtn')
-};
-
-let db;
-let currentFolderId = ROOT_ID;
-let selectedPhotoId = null;
-let syncRunning = false;
-let lastObjectUrls = [];
-
-function req(request) {
-  return new Promise((resolve, reject) => {
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
-  });
-}
-
-function txDone(tx) {
-  return new Promise((resolve, reject) => {
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-    tx.onabort = () => reject(tx.error);
-  });
-}
-
-function openDb() {
-  return new Promise((resolve, reject) => {
-    const request = indexedDB.open(DB_NAME, DB_VERSION);
-    request.onerror = () => reject(request.error);
-    request.onsuccess = () => resolve(request.result);
-    request.onupgradeneeded = () => {
-      const d = request.result;
-      if (!d.objectStoreNames.contains('settings')) d.createObjectStore('settings', { keyPath: 'key' });
-      if (!d.objectStoreNames.contains('folders')) {
-        const s = d.createObjectStore('folders', { keyPath: 'id' });
-        s.createIndex('parentId', 'parentId', { unique: false });
-      }
-      if (!d.objectStoreNames.contains('photos')) {
-        const s = d.createObjectStore('photos', { keyPath: 'id' });
-        s.createIndex('folderId', 'folderId', { unique: false });
-        s.createIndex('syncStatus', 'syncStatus', { unique: false });
-        s.createIndex('createdAt', 'createdAt', { unique: false });
-      }
-    };
-  });
-}
-
-async function dbGet(storeName, key) {
-  const tx = db.transaction(storeName, 'readonly');
-  return req(tx.objectStore(storeName).get(key));
-}
-
-async function dbPut(storeName, value) {
-  const tx = db.transaction(storeName, 'readwrite');
-  tx.objectStore(storeName).put(value);
-  await txDone(tx);
-  return value;
-}
-
-async function dbDelete(storeName, key) {
-  const tx = db.transaction(storeName, 'readwrite');
-  tx.objectStore(storeName).delete(key);
-  await txDone(tx);
-}
-
-async function dbAll(storeName) {
-  const tx = db.transaction(storeName, 'readonly');
-  return req(tx.objectStore(storeName).getAll());
-}
-
-async function getSetting(key, fallback = '') {
-  const row = await dbGet('settings', key);
-  return row ? row.value : fallback;
-}
-
-async function setSetting(key, value) {
-  await dbPut('settings', { key, value, updatedAt: new Date().toISOString() });
-}
-
-function uid(prefix = 'id') {
-  const bytes = new Uint8Array(8);
-  crypto.getRandomValues(bytes);
-  const random = [...bytes].map(b => b.toString(16).padStart(2, '0')).join('');
-  return `${prefix}_${Date.now().toString(36)}_${random}`;
-}
-
-function extFromMime(mime) {
-  if (mime === 'image/png') return 'png';
-  if (mime === 'image/heic') return 'heic';
-  if (mime === 'image/heif') return 'heif';
-  return 'jpg';
-}
-
-function safeSegment(input) {
-  return String(input || '未命名')
-    .trim()
-    .replace(/[\\/:*?"<>|#%{}^~\[\]`;&]/g, '_')
-    .replace(/\s+/g, '_')
-    .slice(0, 80) || '未命名';
-}
-
-function formatBytes(n = 0) {
-  if (n < 1024) return `${n} B`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
-  if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
-  return `${(n / 1024 / 1024 / 1024).toFixed(1)} GB`;
-}
-
-function formatTs(iso) {
-  if (!iso) return '';
-  return new Date(iso).toLocaleString('zh-CN', { hour12: false });
-}
-
-async function ensureRootFolder() {
-  const root = await dbGet('folders', ROOT_ID);
-  if (!root) {
-    await dbPut('folders', {
-      id: ROOT_ID,
-      name: '全部分类',
-      parentId: null,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString()
-    });
-  }
-}
-
-async function getFolderMap() {
-  const folders = await dbAll('folders');
-  return new Map(folders.map(f => [f.id, f]));
-}
-
-async function getFolderPath(folderId) {
-  const map = await getFolderMap();
-  const path = [];
-  let cur = map.get(folderId);
-  let guard = 0;
-  while (cur && cur.id !== ROOT_ID && guard++ < 50) {
-    path.unshift(cur);
-    cur = map.get(cur.parentId);
-  }
-  return path;
-}
-
-async function getFolderPathNames(folderId) {
-  const path = await getFolderPath(folderId);
-  return path.map(f => f.name);
-}
-
-async function getChildren(parentId) {
-  const folders = await dbAll('folders');
-  return folders
-    .filter(f => f.parentId === parentId)
-    .sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'));
-}
-
-async function getActivePhotosInFolder(folderId) {
-  const photos = await dbAll('photos');
-  return photos
-    .filter(p => p.folderId === folderId && !p.deletedAt)
-    .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
-}
-
-async function sha256Hex(blob) {
-  const buffer = await blob.arrayBuffer();
-  const hashBuffer = await crypto.subtle.digest('SHA-256', buffer);
-  return [...new Uint8Array(hashBuffer)].map(b => b.toString(16).padStart(2, '0')).join('');
-}
-
-function blobToDataUrl(blob) {
-  return new Promise((resolve, reject) => {
-    const r = new FileReader();
-    r.onerror = () => reject(r.error);
-    r.onload = () => resolve(r.result);
-    r.readAsDataURL(blob);
-  });
-}
-
-async function makeThumbnail(blob) {
-  const dataUrl = await blobToDataUrl(blob);
-  const img = await new Promise((resolve, reject) => {
-    const i = new Image();
-    i.onload = () => resolve(i);
-    i.onerror = reject;
-    i.src = dataUrl;
-  });
-  const scale = Math.min(1, MAX_THUMBNAIL / Math.max(img.width, img.height));
-  const canvas = document.createElement('canvas');
-  canvas.width = Math.max(1, Math.round(img.width * scale));
-  canvas.height = Math.max(1, Math.round(img.height * scale));
-  const ctx = canvas.getContext('2d');
-  ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-  return await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.72));
-}
-
-async function updateStorageLine() {
-  let persistedText = '未知';
-  try {
-    if (navigator.storage?.persisted) {
-      const already = await navigator.storage.persisted();
-      const persisted = already || (navigator.storage.persist ? await navigator.storage.persist() : false);
-      persistedText = persisted ? '已请求持久化保护' : '未获得持久化保护';
-    }
-  } catch {
-    persistedText = '无法检测持久化保护';
-  }
-
-  let quotaText = '';
-  try {
-    if (navigator.storage?.estimate) {
-      const { usage = 0, quota = 0 } = await navigator.storage.estimate();
-      quotaText = ` · 已用 ${formatBytes(usage)} / 可用 ${formatBytes(quota)}`;
-    }
-  } catch {}
-  els.storageLine.textContent = `${persistedText}${quotaText}`;
-}
-
-async function render() {
-  const folders = await dbAll('folders');
-  const allPhotos = await dbAll('photos');
-  const activePhotos = allPhotos.filter(p => !p.deletedAt);
-  const pending = allPhotos.filter(p => ['pending', 'deletePending'].includes(p.syncStatus));
-  const failed = allPhotos.filter(p => p.syncStatus === 'failed');
-  const trash = allPhotos.filter(p => !!p.deletedAt);
-  const children = await getChildren(currentFolderId);
-  const currentPhotos = activePhotos.filter(p => p.folderId === currentFolderId);
-  const path = await getFolderPath(currentFolderId);
-  const currentFolderName = currentFolderId === ROOT_ID ? '全部分类' : (path[path.length - 1]?.name || '当前分类');
-
-  els.statPhotos.textContent = activePhotos.length;
-  els.statPending.textContent = pending.length;
-  els.statFailed.textContent = failed.length;
-  els.statTrash.textContent = trash.length;
-  if (els.currentFolderTitle) els.currentFolderTitle.textContent = currentFolderName;
-  if (els.currentFolderMeta) els.currentFolderMeta.textContent = `${children.length} 个子分类 · ${currentPhotos.length} 张照片`;
-  if (els.folderCount) els.folderCount.textContent = `${children.length} 个`;
-  if (els.photoCount) els.photoCount.textContent = `${currentPhotos.length} 张`;
-
-  const unsyncedActive = activePhotos.filter(p => p.syncStatus !== 'synced');
-  if (unsyncedActive.length > 0 || failed.length > 0) {
-    els.noticeBox.hidden = false;
-    els.noticeBox.textContent = `还有 ${unsyncedActive.length} 张活动照片未同步到 GitHub。请不要清理 Safari 网站数据；同步前可先导出 ZIP 作为第二份备份。`;
-  } else {
-    els.noticeBox.hidden = true;
-  }
-
-  await renderBreadcrumbs(path);
-  await renderFolders(children, allPhotos);
-  await renderPhotos(currentPhotos);
-}
-
-async function renderBreadcrumbs(path = null) {
-  path = path || await getFolderPath(currentFolderId);
-  els.breadcrumbs.innerHTML = '';
-  const rootBtn = document.createElement('button');
-  rootBtn.textContent = '全部分类';
-  rootBtn.onclick = () => { currentFolderId = ROOT_ID; render(); };
-  els.breadcrumbs.append(rootBtn);
-  for (const f of path) {
-    const btn = document.createElement('button');
-    btn.textContent = `› ${f.name}`;
-    btn.onclick = () => { currentFolderId = f.id; render(); };
-    els.breadcrumbs.append(btn);
-  }
-}
-
-async function renderFolders(children = null, allPhotos = null) {
-  children = children || await getChildren(currentFolderId);
-  allPhotos = allPhotos || await dbAll('photos');
-  els.folderList.innerHTML = '';
-  if (children.length === 0) {
-    const empty = document.createElement('div');
-    empty.className = 'empty';
-    empty.textContent = '还没有子分类。可以先新建分类，或直接在当前分类拍照。';
-    els.folderList.append(empty);
-    return;
-  }
-  for (const folder of children) {
-    const item = document.createElement('div');
-    item.className = 'folder-item';
-
-    const main = document.createElement('div');
-    main.className = 'folder-main';
-    const icon = document.createElement('div');
-    icon.className = 'folder-icon';
-    icon.textContent = '📁';
-    const copy = document.createElement('div');
-    copy.style.minWidth = '0';
-    const name = document.createElement('div');
-    name.className = 'name';
-    name.textContent = folder.name;
-    const sub = document.createElement('div');
-    sub.className = 'sub';
-    const count = allPhotos.filter(p => p.folderId === folder.id && !p.deletedAt).length;
-    sub.textContent = `${count} 张照片`;
-    copy.append(name, sub);
-    main.append(icon, copy);
-
-    const actions = document.createElement('div');
-    actions.className = 'folder-actions';
-    const openBtn = document.createElement('button');
-    openBtn.textContent = '进入';
-    openBtn.onclick = () => { currentFolderId = folder.id; render(); };
-    const delBtn = document.createElement('button');
-    delBtn.textContent = '删除';
-    delBtn.className = 'danger';
-    delBtn.onclick = async () => deleteFolder(folder.id);
-    actions.append(openBtn, delBtn);
-    item.append(main, actions);
-    els.folderList.append(item);
-  }
-}
-
-async function renderPhotos(photos = null) {
-  photos = photos || await getActivePhotosInFolder(currentFolderId);
-  for (const url of lastObjectUrls) URL.revokeObjectURL(url);
-  lastObjectUrls = [];
-  els.photoGrid.innerHTML = '';
-  if (photos.length === 0) {
-    const empty = document.createElement('div');
-    empty.className = 'empty';
-    empty.textContent = '这个分类还没有照片。点击上方“拍照”，照片会先保存到本机，再进入同步队列。';
-    els.photoGrid.append(empty);
-    return;
-  }
-
-  for (const photo of photos) {
-    const btn = document.createElement('button');
-    btn.className = 'photo-card';
-    const blob = photo.thumbBlob || photo.blob;
-    const url = URL.createObjectURL(blob);
-    lastObjectUrls.push(url);
-    const badgeClass = photo.syncStatus === 'synced' ? 'synced' : photo.syncStatus === 'failed' ? 'failed' : 'pending';
-    const badgeText = photo.syncStatus === 'synced' ? '已同步' : photo.syncStatus === 'failed' ? '失败' : '待同步';
-    const img = document.createElement('img');
-    img.alt = '照片';
-    img.src = url;
-    const badge = document.createElement('span');
-    badge.className = `badge ${badgeClass}`;
-    badge.textContent = badgeText;
-    btn.append(img, badge);
-    btn.onclick = () => openPhoto(photo.id);
-    els.photoGrid.append(btn);
-  }
-}
-
-async function createFolder() {
-  const name = prompt('分类名称');
-  if (!name?.trim()) return;
-  const now = new Date().toISOString();
-  await dbPut('folders', { id: uid('folder'), name: name.trim(), parentId: currentFolderId, createdAt: now, updatedAt: now });
-  await render();
-  await syncFoldersSafe();
-}
-
-async function deleteFolder(folderId) {
-  const children = await getChildren(folderId);
-  const photos = await getActivePhotosInFolder(folderId);
-  if (children.length || photos.length) {
-    alert('为了避免误删数据，第一版只允许删除空分类。请先移动或删除里面的照片和子分类。');
-    return;
-  }
-  if (!confirm('确认删除这个空分类？')) return;
-  await dbDelete('folders', folderId);
-  await render();
-  await syncFoldersSafe();
-}
-
-async function handleCapture(file) {
-  if (!file) return;
-  const now = new Date();
-  const createdAt = now.toISOString();
-  const id = uid('photo');
-  const ext = extFromMime(file.type);
-  const filename = `${createdAt.replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z')}_${id}.${ext}`;
-
-  setBusy(true, '正在把照片先保存到本地…');
-  try {
-    const hash = await sha256Hex(file);
-    let thumbBlob = null;
-    try {
-      thumbBlob = await makeThumbnail(file);
-    } catch (thumbErr) {
-      console.warn('thumbnail failed; original photo is still saved', thumbErr);
-    }
-    const photo = {
-      id,
-      folderId: currentFolderId,
-      filename,
-      blob: file,
-      thumbBlob,
-      mime: file.type || 'image/jpeg',
-      size: file.size,
-      sha256: hash,
-      note: '',
-      createdAt,
-      updatedAt: createdAt,
-      exportedAt: null,
-      syncStatus: 'pending',
-      retryCount: 0,
-      lastError: '',
-      remotePath: '',
-      remoteMetaPath: '',
-      remoteSyncedAt: null,
-      deletedAt: null
-    };
-    await dbPut('photos', photo);
-    await render();
-    await syncNow(false);
-  } catch (err) {
-    alert(`保存照片失败：${err.message || err}`);
-  } finally {
-    setBusy(false);
-    els.cameraInput.value = '';
-  }
-}
-
-function setBusy(isBusy, label = '') {
-  for (const el of [els.captureBtn, els.syncBtn, els.exportBtn]) el.disabled = isBusy;
-  if (label) {
-    els.noticeBox.hidden = false;
-    els.noticeBox.textContent = label;
-  }
-}
-
-async function openPhoto(photoId) {
-  const photo = await dbGet('photos', photoId);
-  if (!photo) return;
-  selectedPhotoId = photoId;
-  els.photoPreview.src = URL.createObjectURL(photo.blob);
-  els.photoNote.value = photo.note || '';
-  els.photoMeta.textContent = `状态：${photo.syncStatus} · 大小：${formatBytes(photo.size)} · 创建：${formatTs(photo.createdAt)}${photo.remoteSyncedAt ? ` · 已同步：${formatTs(photo.remoteSyncedAt)}` : ''}${photo.lastError ? ` · 错误：${photo.lastError}` : ''}`;
-  els.photoDialog.showModal();
-}
-
-async function saveSelectedNote() {
-  if (!selectedPhotoId) return;
-  const photo = await dbGet('photos', selectedPhotoId);
-  if (!photo) return;
-  photo.note = els.photoNote.value.trim();
-  photo.updatedAt = new Date().toISOString();
-  if (photo.syncStatus === 'synced') photo.syncStatus = 'pending';
-  await dbPut('photos', photo);
-  await render();
-  await syncNow(false);
-}
-
-async function softDeleteSelectedPhoto() {
-  if (!selectedPhotoId) return;
-  const photo = await dbGet('photos', selectedPhotoId);
-  if (!photo) return;
-  const warning = photo.syncStatus === 'synced'
-    ? '这会在本地隐藏照片，并请求 Worker 删除 GitHub 里的对应文件。本地副本会先保留在回收站。继续？'
-    : '这张照片尚未同步到 GitHub。本地会先放入回收站，不会立即物理删除。继续？';
-  if (!confirm(warning)) return;
-  photo.deletedAt = new Date().toISOString();
-  photo.updatedAt = photo.deletedAt;
-  photo.syncStatus = photo.remotePath ? 'deletePending' : 'deletedLocal';
-  await dbPut('photos', photo);
-  els.photoDialog.close();
-  await render();
-  await syncNow(false);
-}
-
-async function getSyncConfig() {
-  const apiBase = String(await getSetting('apiBase', '')).replace(/\/+$/, '');
-  const appPassword = await getSetting('appPassword', '');
-  return { apiBase, appPassword };
-}
-
-async function showSettings() {
-  const { apiBase, appPassword } = await getSyncConfig();
-  els.apiBaseInput.value = apiBase;
-  els.appPasswordInput.value = appPassword;
-  els.settingsDialog.showModal();
-}
-
-async function saveSettings() {
-  await setSetting('apiBase', els.apiBaseInput.value.trim().replace(/\/+$/, ''));
-  await setSetting('appPassword', els.appPasswordInput.value);
-  await render();
-}
-
-async function syncFoldersSafe() {
-  try { await syncFolders(); } catch (err) { console.warn('sync folders failed', err); }
-}
-
-async function syncFolders() {
-  const { apiBase, appPassword } = await getSyncConfig();
-  if (!apiBase || !appPassword) return false;
-  const folders = await dbAll('folders');
-  const res = await fetch(`${apiBase}/folders`, {
-    method: 'PUT',
-    headers: { 'content-type': 'application/json', 'x-app-password': appPassword },
-    body: JSON.stringify({ folders, updatedAt: new Date().toISOString() })
-  });
-  if (!res.ok) throw new Error(await res.text());
-  return true;
-}
-
-async function syncNow(showAlert = true) {
-  if (syncRunning) return;
-  const { apiBase, appPassword } = await getSyncConfig();
-  if (!apiBase || !appPassword) {
-    if (showAlert) await showSettings();
-    return;
-  }
-  syncRunning = true;
-  setBusy(true, '正在同步：先同步分类，再逐张上传/删除，失败会保留在本地队列…');
-  try {
-    await syncFolders();
-    const photos = (await dbAll('photos')).sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
-    for (const photo of photos) {
-      if (photo.syncStatus === 'pending' || photo.syncStatus === 'failed') {
-        await uploadPhoto(photo, apiBase, appPassword);
-      } else if (photo.syncStatus === 'deletePending') {
-        await deleteRemotePhoto(photo, apiBase, appPassword);
-      }
-    }
-    if (showAlert) alert('同步完成。失败的照片会继续保留在本地，可再次点击同步。');
-  } catch (err) {
-    console.error(err);
-    if (showAlert) alert(`同步中断：${err.message || err}`);
-  } finally {
-    syncRunning = false;
-    setBusy(false);
-    await updateStorageLine();
-    await render();
-  }
-}
-
-async function buildPhotoMetadata(photo) {
-  const folderPath = await getFolderPathNames(photo.folderId);
-  const created = new Date(photo.createdAt);
-  const yyyy = created.getFullYear();
-  const mm = String(created.getMonth() + 1).padStart(2, '0');
-  const safePath = folderPath.map(safeSegment).join('/');
-  const remoteDir = safePath ? `photos/${yyyy}/${mm}/${safePath}` : `photos/${yyyy}/${mm}/未分类`;
-  const remotePath = `${remoteDir}/${safeSegment(photo.filename)}`;
-  const remoteMetaPath = `${remotePath}.json`;
-  return {
-    id: photo.id,
-    folderId: photo.folderId,
-    folderPath,
-    filename: photo.filename,
-    mime: photo.mime,
-    size: photo.size,
-    sha256: photo.sha256,
-    note: photo.note || '',
-    createdAt: photo.createdAt,
-    updatedAt: photo.updatedAt,
-    remotePath,
-    remoteMetaPath,
-    app: 'camera-archive-app',
-    version: 1
-  };
-}
-
-async function uploadPhoto(photo, apiBase, appPassword) {
-  const metadata = await buildPhotoMetadata(photo);
-  const fd = new FormData();
-  fd.append('file', photo.blob, photo.filename);
-  fd.append('metadata', JSON.stringify(metadata));
-  try {
-    const res = await fetch(`${apiBase}/upload`, {
-      method: 'POST',
-      headers: { 'x-app-password': appPassword },
-      body: fd
-    });
-    const body = await safeJson(res);
-    if (!res.ok) throw new Error(body?.error || body?.message || res.statusText);
-    photo.syncStatus = 'synced';
-    photo.remotePath = body.remotePath;
-    photo.remoteMetaPath = body.remoteMetaPath;
-    photo.remoteSyncedAt = new Date().toISOString();
-    photo.lastError = '';
-    photo.retryCount = 0;
-    await dbPut('photos', photo);
-  } catch (err) {
-    photo.syncStatus = 'failed';
-    photo.retryCount = (photo.retryCount || 0) + 1;
-    photo.lastError = String(err.message || err).slice(0, 500);
-    await dbPut('photos', photo);
-  }
-}
-
-async function deleteRemotePhoto(photo, apiBase, appPassword) {
-  if (!photo.remotePath) {
-    photo.syncStatus = 'deletedLocal';
-    await dbPut('photos', photo);
-    return;
-  }
-  try {
-    const res = await fetch(`${apiBase}/photo`, {
-      method: 'DELETE',
-      headers: { 'content-type': 'application/json', 'x-app-password': appPassword },
-      body: JSON.stringify({ remotePath: photo.remotePath, remoteMetaPath: photo.remoteMetaPath })
-    });
-    const body = await safeJson(res);
-    if (!res.ok) throw new Error(body?.error || body?.message || res.statusText);
-    photo.syncStatus = 'deletedSynced';
-    photo.remoteDeletedAt = new Date().toISOString();
-    await dbPut('photos', photo);
-  } catch (err) {
-    photo.syncStatus = 'deletePending';
-    photo.lastError = String(err.message || err).slice(0, 500);
-    await dbPut('photos', photo);
-  }
-}
-
-async function safeJson(res) {
-  const text = await res.text();
-  if (!text) return null;
-  try { return JSON.parse(text); } catch { return { message: text }; }
-}
-
-async function exportZip() {
-  if (!window.JSZip) {
-    alert('JSZip 还没加载完成或 CDN 不可用。联网刷新一次后再试。');
-    return;
-  }
-  setBusy(true, '正在生成 ZIP 备份，本地未同步照片也会一起导出…');
-  try {
-    const zip = new JSZip();
-    const folders = await dbAll('folders');
-    const photos = (await dbAll('photos')).filter(p => !p.deletedAt);
-    const manifest = { exportedAt: new Date().toISOString(), app: 'camera-archive-app', version: 1, folders, photos: [] };
-
-    zip.file('folders.json', JSON.stringify(folders, null, 2));
-    for (const photo of photos) {
-      const meta = await buildPhotoMetadata(photo);
-      const folderPath = meta.folderPath.length ? meta.folderPath.map(safeSegment).join('/') : '未分类';
-      const filePath = `${folderPath}/${safeSegment(photo.filename)}`;
-      zip.file(filePath, photo.blob);
-      manifest.photos.push({
-        ...meta,
-        remotePath: photo.remotePath || '',
-        remoteMetaPath: photo.remoteMetaPath || '',
-        remoteSyncedAt: photo.remoteSyncedAt || null,
-        zipPath: filePath,
-        exportedAt: new Date().toISOString()
-      });
-      photo.exportedAt = new Date().toISOString();
-      await dbPut('photos', photo);
-    }
-    zip.file('manifest.json', JSON.stringify(manifest, null, 2));
-    const blob = await zip.generateAsync({ type: 'blob', compression: 'DEFLATE', compressionOptions: { level: 6 } });
-    const zipFileName = `SceneCamera_Backup_${new Date().toISOString().slice(0,19).replace(/[-:T]/g,'')}.zip`;
-    const file = new File([blob], zipFileName, { type: 'application/zip' });
-
-    if (navigator.canShare?.({ files: [file] }) && navigator.share) {
-      await navigator.share({ files: [file], title: '场景相机备份' });
-    } else {
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = zipFileName;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      setTimeout(() => URL.revokeObjectURL(url), 60000);
-    }
-    await render();
-  } catch (err) {
-    alert(`导出失败：${err.message || err}`);
-  } finally {
-    setBusy(false);
-  }
-}
-
-async function importZip(file) {
-  if (!file) return;
-  if (!window.JSZip) {
-    alert('JSZip 还没加载完成或 CDN 不可用。联网刷新一次后再试。');
-    return;
-  }
-  setBusy(true, '正在导入 ZIP，已有照片不会覆盖…');
-  try {
-    const zip = await JSZip.loadAsync(file);
-    const foldersText = await zip.file('folders.json')?.async('string');
-    const manifestText = await zip.file('manifest.json')?.async('string');
-    if (!foldersText || !manifestText) throw new Error('ZIP 缺少 folders.json 或 manifest.json');
-    const folders = JSON.parse(foldersText);
-    const manifest = JSON.parse(manifestText);
-    for (const folder of folders) {
-      if (!await dbGet('folders', folder.id)) await dbPut('folders', folder);
-    }
-    let imported = 0;
-    for (const item of manifest.photos || []) {
-      if (await dbGet('photos', item.id)) continue;
-      const entry = zip.file(item.zipPath);
-      if (!entry) continue;
-      const blob = await entry.async('blob');
-      const thumbBlob = await makeThumbnail(blob);
-      const hash = await sha256Hex(blob);
-      await dbPut('photos', {
-        id: item.id,
-        folderId: item.folderId || ROOT_ID,
-        filename: item.filename || item.zipPath.split('/').pop(),
-        blob,
-        thumbBlob,
-        mime: item.mime || blob.type || 'image/jpeg',
-        size: item.size || blob.size,
-        sha256: item.sha256 || hash,
-        note: item.note || '',
-        createdAt: item.createdAt || new Date().toISOString(),
-        updatedAt: item.updatedAt || new Date().toISOString(),
-        exportedAt: item.exportedAt || new Date().toISOString(),
-        syncStatus: item.remotePath ? 'synced' : 'pending',
-        retryCount: 0,
-        lastError: '',
-        remotePath: item.remotePath || '',
-        remoteMetaPath: item.remoteMetaPath || '',
-        remoteSyncedAt: item.remotePath ? new Date().toISOString() : null,
-        deletedAt: null
-      });
-      imported++;
-    }
-    alert(`导入完成：${imported} 张新照片。`);
-    await render();
-  } catch (err) {
-    alert(`导入失败：${err.message || err}`);
-  } finally {
-    els.importInput.value = '';
-    setBusy(false);
-  }
-}
-
-async function init() {
-  db = await openDb();
-  await ensureRootFolder();
-  await updateStorageLine();
-  await render();
-
-  if ('serviceWorker' in navigator) {
-    try { await navigator.serviceWorker.register('./sw.js'); } catch (err) { console.warn('sw register failed', err); }
-  }
-
-  els.newFolderBtn.onclick = createFolder;
-  els.captureBtn.onclick = () => els.cameraInput.click();
-  els.cameraInput.onchange = () => handleCapture(els.cameraInput.files?.[0]);
-  els.syncBtn.onclick = () => syncNow(true);
-  els.exportBtn.onclick = exportZip;
-  els.importInput.onchange = () => importZip(els.importInput.files?.[0]);
-  els.settingsBtn.onclick = showSettings;
-  els.saveSettingsBtn.onclick = saveSettings;
-  els.saveNoteBtn.onclick = saveSelectedNote;
-  els.deletePhotoBtn.onclick = softDeleteSelectedPhoto;
-
-  window.addEventListener('online', () => syncNow(false));
-}
-
-init().catch(err => {
-  console.error(err);
-  alert(`启动失败：${err.message || err}`);
-});
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>场景相机</title>
+  <meta name="theme-color" content="#0b1020" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="场景相机" />
+  <link rel="manifest" href="./manifest.webmanifest" />
+  <link rel="apple-touch-icon" href="./icons/icon-192.png" />
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <header class="app-header">
+    <div class="brand">
+      <div class="brand-icon" aria-hidden="true">📷</div>
+      <div class="brand-copy">
+        <h1>场景相机</h1>
+        <p id="storageLine">正在检查存储状态…</p>
+      </div>
+    </div>
+    <button id="settingsBtn" class="icon-button" aria-label="设置">设置</button>
+  </header>
+
+  <main class="app-shell">
+    <section class="hero-card" aria-label="当前分类">
+      <div>
+        <p class="eyebrow">当前分类</p>
+        <h2 id="currentFolderTitle">全部分类</h2>
+        <p id="currentFolderMeta" class="muted-line">0 个子分类 · 0 张照片</p>
+      </div>
+      <button id="captureBtn" class="primary capture-main">拍照</button>
+    </section>
+
+    <section class="status-grid" aria-label="数据状态">
+      <div class="stat synced-card"><strong id="statPhotos">0</strong><span>本地照片</span></div>
+      <div class="stat pending-card"><strong id="statPending">0</strong><span>待同步</span></div>
+      <div class="stat failed-card"><strong id="statFailed">0</strong><span>失败</span></div>
+      <div class="stat trash-card"><strong id="statTrash">0</strong><span>回收站</span></div>
+    </section>
+
+    <section class="action-panel" aria-label="常用操作">
+      <button id="newFolderBtn">新建分类</button>
+      <button id="syncBtn">同步</button>
+      <button id="exportBtn">导出 ZIP</button>
+      <label class="buttonLike">
+        导入 ZIP
+        <input id="importInput" type="file" accept=".zip,application/zip" hidden />
+      </label>
+    </section>
+
+    <section class="notice" id="noticeBox" hidden></section>
+
+    <section class="content-card path-card">
+      <div class="section-title-row">
+        <div>
+          <p class="eyebrow">位置</p>
+          <h3>分类路径</h3>
+        </div>
+      </div>
+      <nav id="breadcrumbs" class="breadcrumbs"></nav>
+    </section>
+
+    <section class="content-card">
+      <div class="section-title-row">
+        <div>
+          <p class="eyebrow">Folders</p>
+          <h3>子分类</h3>
+        </div>
+        <span id="folderCount" class="pill">0 个</span>
+      </div>
+      <div id="folderList" class="folder-list"></div>
+    </section>
+
+    <section class="content-card photo-section">
+      <div class="section-title-row">
+        <div>
+          <p class="eyebrow">Photos</p>
+          <h3>照片</h3>
+        </div>
+        <span id="photoCount" class="pill">0 张</span>
+      </div>
+      <div id="photoGrid" class="photo-grid"></div>
+    </section>
+  </main>
+
+  <input id="cameraInput" type="file" accept="image/*" capture="environment" hidden />
+
+  <dialog id="settingsDialog">
+    <form method="dialog" class="dialog-card">
+      <div class="dialog-header">
+        <div>
+          <p class="eyebrow">Settings</p>
+          <h2>同步设置</h2>
+        </div>
+      </div>
+      <label>
+        Cloudflare Worker 地址
+        <input id="apiBaseInput" placeholder="https://你的-worker.workers.dev" autocomplete="off" />
+      </label>
+      <label>
+        App 密码
+        <input id="appPasswordInput" type="password" placeholder="Worker 里的 APP_PASSWORD" autocomplete="current-password" />
+      </label>
+      <p class="hint">密码只保存在这台设备的浏览器本地。真正的 GitHub Token 只放在 Cloudflare Worker Secret 里。</p>
+      <menu>
+        <button value="cancel">取消</button>
+        <button id="saveSettingsBtn" value="default" class="primary">保存</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <dialog id="photoDialog" class="photo-dialog">
+    <form method="dialog" class="dialog-card photo-dialog-card">
+      <img id="photoPreview" alt="照片预览" />
+      <textarea id="photoNote" placeholder="备注，可选"></textarea>
+      <p id="photoMeta" class="hint"></p>
+      <menu>
+        <button id="saveNoteBtn" value="default">保存备注</button>
+        <button id="deletePhotoBtn" value="default" class="danger">删除</button>
+        <button value="cancel">关闭</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js" defer></script>
+  <script src="./app.js" type="module"></script>
+</body>
+</html>
