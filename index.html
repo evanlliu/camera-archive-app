@@ -68,6 +68,10 @@
         App 密码
         <input id="appPasswordInput" type="password" placeholder="Worker 里的 APP_PASSWORD" autocomplete="current-password" />
       </label>
+      <div class="settings-actions">
+        <button id="testConnectionBtn" type="button">测试连接</button>
+      </div>
+      <p id="testConnectionResult" class="test-result" hidden></p>
       <p class="hint">密码只保存在这台设备的浏览器本地。真正的 GitHub Token 只放在 Cloudflare Worker Secret 里。</p>
       <menu>
         <button value="cancel">取消</button>

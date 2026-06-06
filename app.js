@@ -25,6 +25,8 @@ const els = {
   apiBaseInput: $('apiBaseInput'),
   appPasswordInput: $('appPasswordInput'),
   saveSettingsBtn: $('saveSettingsBtn'),
+  testConnectionBtn: $('testConnectionBtn'),
+  testConnectionResult: $('testConnectionResult'),
   photoDialog: $('photoDialog'),
   photoPreview: $('photoPreview'),
   photoNote: $('photoNote'),
@@ -480,6 +482,91 @@ async function saveSettings() {
   await render();
 }
 
+function setTestResult(message, type = 'info') {
+  if (!els.testConnectionResult) return;
+  els.testConnectionResult.hidden = false;
+  els.testConnectionResult.className = `test-result ${type}`;
+  els.testConnectionResult.textContent = message;
+}
+
+async function readResponseText(res) {
+  const text = await res.text();
+  try {
+    const json = JSON.parse(text);
+    return json.error || json.message || text;
+  } catch (_) {
+    return text;
+  }
+}
+
+async function testConnection() {
+  const apiBase = els.apiBaseInput.value.trim().replace(/\/+$/, '');
+  const appPassword = els.appPasswordInput.value;
+
+  if (!apiBase) {
+    setTestResult('请先填写 Cloudflare Worker 地址。', 'error');
+    return;
+  }
+  if (!/^https:\/\//i.test(apiBase)) {
+    setTestResult('Worker 地址必须以 https:// 开头。', 'error');
+    return;
+  }
+  if (!appPassword) {
+    setTestResult('请先填写 App 密码。', 'error');
+    return;
+  }
+
+  els.testConnectionBtn.disabled = true;
+  setTestResult('正在测试 Worker 地址、App 密码和 GitHub 仓库访问…', 'info');
+
+  try {
+    const rootRes = await fetch(`${apiBase}/`, { method: 'GET', cache: 'no-store' });
+    if (!rootRes.ok) {
+      const msg = await readResponseText(rootRes);
+      throw new Error(`Worker 首页返回 ${rootRes.status}：${msg}`);
+    }
+
+    const healthRes = await fetch(`${apiBase}/health`, {
+      method: 'GET',
+      cache: 'no-store',
+      headers: { 'x-app-password': appPassword }
+    });
+
+    if (healthRes.status === 404) {
+      // 兼容旧 Worker：如果还没更新 /health，就用 /folders 测试密码和 GitHub 读权限。
+      const foldersRes = await fetch(`${apiBase}/folders`, {
+        method: 'GET',
+        cache: 'no-store',
+        headers: { 'x-app-password': appPassword }
+      });
+      if (!foldersRes.ok) {
+        const msg = await readResponseText(foldersRes);
+        throw new Error(`Worker 可访问，但密码或 GitHub 读取失败：${foldersRes.status} ${msg}`);
+      }
+      setTestResult('连接成功：Worker 可访问，App 密码有效，GitHub 读取正常。建议同步前仍更新新版 Worker 代码以启用完整健康检查。', 'ok');
+      return;
+    }
+
+    if (!healthRes.ok) {
+      const msg = await readResponseText(healthRes);
+      throw new Error(`Worker 可访问，但认证或 GitHub 检查失败：${healthRes.status} ${msg}`);
+    }
+
+    const health = await healthRes.json();
+    const repo = health.repo || 'GitHub 仓库';
+    setTestResult(`连接成功：Worker 正常，密码有效，GitHub 仓库 ${repo} 可访问。`, 'ok');
+  } catch (err) {
+    const msg = err?.message || String(err);
+    if (msg.includes('Load failed') || msg.includes('Failed to fetch')) {
+      setTestResult('连接失败：浏览器无法访问 Worker。请检查 Worker 地址、Cloudflare 是否已部署、CORS_ORIGIN 是否为 https://evanlliu.github.io。', 'error');
+    } else {
+      setTestResult(`连接失败：${msg}`, 'error');
+    }
+  } finally {
+    els.testConnectionBtn.disabled = false;
+  }
+}
+
 async function syncFoldersSafe() {
   try { await syncFolders(); } catch (err) { console.warn('sync folders failed', err); }
 }
@@ -743,6 +830,7 @@ async function init() {
   els.importInput.onchange = () => importZip(els.importInput.files?.[0]);
   els.settingsBtn.onclick = showSettings;
   els.saveSettingsBtn.onclick = saveSettings;
+  els.testConnectionBtn.onclick = testConnection;
   els.saveNoteBtn.onclick = saveSelectedNote;
   els.deletePhotoBtn.onclick = softDeleteSelectedPhoto;
 
