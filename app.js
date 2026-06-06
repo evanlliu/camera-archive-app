@@ -40,6 +40,9 @@ const els = {
   nextPhotoBtn: $('nextPhotoBtn'),
   prevPhotoTextBtn: $('prevPhotoTextBtn'),
   nextPhotoTextBtn: $('nextPhotoTextBtn'),
+  zoomOutBtn: $('zoomOutBtn'),
+  zoomResetBtn: $('zoomResetBtn'),
+  zoomInBtn: $('zoomInBtn'),
   saveNoteBtn: $('saveNoteBtn'),
   deletePhotoBtn: $('deletePhotoBtn')
 };
@@ -52,6 +55,13 @@ let photoViewerIds = [];
 let syncRunning = false;
 let lastObjectUrls = [];
 let currentPreviewUrl = '';
+let photoZoom = 1;
+let photoPanX = 0;
+let photoPanY = 0;
+let photoPointers = new Map();
+let photoPinchStart = null;
+let photoDragStart = null;
+let photoLastTapAt = 0;
 
 function fetchWithTimeout(url, options = {}, timeoutMs = 30000) {
   const controller = new AbortController();
@@ -225,6 +235,28 @@ async function getChildren(parentId) {
   return folders
     .filter(f => f.parentId === parentId)
     .sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'));
+}
+
+async function getDescendantFolderIds(folderId) {
+  const folders = await dbAll('folders');
+  const childMap = new Map();
+  for (const folder of folders) {
+    const parentId = folder.parentId || ROOT_ID;
+    if (!childMap.has(parentId)) childMap.set(parentId, []);
+    childMap.get(parentId).push(folder.id);
+  }
+
+  const ids = new Set([folderId]);
+  const stack = [folderId];
+  while (stack.length) {
+    const current = stack.pop();
+    for (const childId of childMap.get(current) || []) {
+      if (ids.has(childId)) continue;
+      ids.add(childId);
+      stack.push(childId);
+    }
+  }
+  return ids;
 }
 
 async function getActivePhotosInFolder(folderId) {
@@ -445,11 +477,47 @@ async function renameFolder(folderId) {
   if (!name?.trim()) return;
   const nextName = name.trim();
   if (nextName === folder.name) return;
+
+  const affectedFolderIds = await getDescendantFolderIds(folderId);
+  const allPhotos = await dbAll('photos');
+  const photosToMove = allPhotos.filter(photo =>
+    !photo.deletedAt &&
+    affectedFolderIds.has(photo.folderId) &&
+    photo.remotePath
+  );
+
+  if (photosToMove.length) {
+    const ok = confirm(`分类“${folder.name}”将改名为“${nextName}”。\n\n这个分类及子分类下有 ${photosToMove.length} 张已关联 GitHub 路径的照片。同步时会把 GitHub 里的照片路径迁移到新分类名称下面，并清理旧路径。继续？`);
+    if (!ok) return;
+  }
+
   folder.name = nextName;
   folder.updatedAt = new Date().toISOString();
   await dbPut('folders', folder);
+
+  let marked = 0;
+  const now = new Date().toISOString();
+  for (const photo of photosToMove) {
+    if (!photo.previousRemotePath) photo.previousRemotePath = photo.remotePath;
+    if (!photo.previousRemoteMetaPath) photo.previousRemoteMetaPath = photo.remoteMetaPath || `${photo.remotePath}.json`;
+    photo.remotePath = '';
+    photo.remoteMetaPath = '';
+    photo.remoteSyncedAt = null;
+    photo.syncStatus = 'pending';
+    photo.updatedAt = now;
+    photo.lastError = '分类已改名，等待同步到新的 GitHub 路径。';
+    await dbPut('photos', photo);
+    marked++;
+  }
+
   await render();
   await syncFoldersSafe();
+
+  if (marked) {
+    els.noticeBox.hidden = false;
+    els.noticeBox.textContent = `分类已改名：${marked} 张照片已加入路径迁移队列。请保持网络连接，正在尝试同步到 GitHub 新路径…`;
+    await syncNow(false);
+  }
 }
 
 async function deleteFolder(folderId) {
@@ -522,6 +590,145 @@ function setBusy(isBusy, label = '') {
   }
 }
 
+
+function clamp(value, min, max) {
+  return Math.min(max, Math.max(min, value));
+}
+
+function applyPhotoTransform() {
+  if (!els.photoPreview) return;
+  const scale = Number.isFinite(photoZoom) ? photoZoom : 1;
+  els.photoPreview.style.transform = `translate3d(${photoPanX}px, ${photoPanY}px, 0) scale(${scale})`;
+  els.photoPreview.style.cursor = scale > 1.01 ? 'grab' : 'default';
+  if (els.zoomResetBtn) els.zoomResetBtn.textContent = `${Math.round(scale * 100)}%`;
+}
+
+function resetPhotoZoom() {
+  photoZoom = 1;
+  photoPanX = 0;
+  photoPanY = 0;
+  photoPointers.clear();
+  photoPinchStart = null;
+  photoDragStart = null;
+  applyPhotoTransform();
+}
+
+function setPhotoZoom(nextZoom, center = null) {
+  const oldZoom = photoZoom || 1;
+  const newZoom = clamp(nextZoom, 1, 5);
+  if (center && els.photoPreview && oldZoom !== newZoom) {
+    const rect = els.photoPreview.getBoundingClientRect();
+    const dx = center.x - (rect.left + rect.width / 2);
+    const dy = center.y - (rect.top + rect.height / 2);
+    const ratio = newZoom / oldZoom;
+    photoPanX = (photoPanX - dx) * ratio + dx;
+    photoPanY = (photoPanY - dy) * ratio + dy;
+  }
+  photoZoom = newZoom;
+  if (photoZoom <= 1.01) {
+    photoZoom = 1;
+    photoPanX = 0;
+    photoPanY = 0;
+  } else {
+    photoPanX = clamp(photoPanX, -1200, 1200);
+    photoPanY = clamp(photoPanY, -1200, 1200);
+  }
+  applyPhotoTransform();
+}
+
+function changePhotoZoom(delta) {
+  setPhotoZoom(photoZoom + delta);
+}
+
+function pointerDistance(a, b) {
+  return Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+}
+
+function pointerCenter(a, b) {
+  return { x: (a.clientX + b.clientX) / 2, y: (a.clientY + b.clientY) / 2 };
+}
+
+function installPhotoZoomHandlers() {
+  const stage = document.querySelector('.photo-stage');
+  if (!stage || stage.dataset.zoomReady === '1') return;
+  stage.dataset.zoomReady = '1';
+  stage.style.touchAction = 'none';
+
+  stage.addEventListener('pointerdown', (event) => {
+    if (!els.photoDialog?.open) return;
+    photoPointers.set(event.pointerId, event);
+    stage.setPointerCapture?.(event.pointerId);
+
+    if (photoPointers.size === 1) {
+      const now = Date.now();
+      if (now - photoLastTapAt < 280) {
+        const center = { x: event.clientX, y: event.clientY };
+        setPhotoZoom(photoZoom > 1.05 ? 1 : 2.5, center);
+        photoLastTapAt = 0;
+      } else {
+        photoLastTapAt = now;
+      }
+      photoDragStart = {
+        x: event.clientX,
+        y: event.clientY,
+        panX: photoPanX,
+        panY: photoPanY
+      };
+    } else if (photoPointers.size === 2) {
+      const pts = [...photoPointers.values()];
+      photoPinchStart = {
+        distance: pointerDistance(pts[0], pts[1]),
+        zoom: photoZoom,
+        center: pointerCenter(pts[0], pts[1]),
+        panX: photoPanX,
+        panY: photoPanY
+      };
+      photoDragStart = null;
+    }
+  });
+
+  stage.addEventListener('pointermove', (event) => {
+    if (!photoPointers.has(event.pointerId)) return;
+    photoPointers.set(event.pointerId, event);
+
+    if (photoPointers.size >= 2 && photoPinchStart) {
+      event.preventDefault();
+      const pts = [...photoPointers.values()].slice(0, 2);
+      const distance = pointerDistance(pts[0], pts[1]) || photoPinchStart.distance;
+      const center = pointerCenter(pts[0], pts[1]);
+      photoPanX = photoPinchStart.panX + center.x - photoPinchStart.center.x;
+      photoPanY = photoPinchStart.panY + center.y - photoPinchStart.center.y;
+      setPhotoZoom(photoPinchStart.zoom * distance / photoPinchStart.distance, center);
+      return;
+    }
+
+    if (photoZoom > 1.01 && photoDragStart && photoPointers.size === 1) {
+      event.preventDefault();
+      photoPanX = photoDragStart.panX + event.clientX - photoDragStart.x;
+      photoPanY = photoDragStart.panY + event.clientY - photoDragStart.y;
+      photoPanX = clamp(photoPanX, -1200, 1200);
+      photoPanY = clamp(photoPanY, -1200, 1200);
+      applyPhotoTransform();
+    }
+  });
+
+  const clearPointer = (event) => {
+    photoPointers.delete(event.pointerId);
+    if (photoPointers.size < 2) photoPinchStart = null;
+    if (photoPointers.size === 0) photoDragStart = null;
+  };
+  stage.addEventListener('pointerup', clearPointer);
+  stage.addEventListener('pointercancel', clearPointer);
+  stage.addEventListener('pointerleave', clearPointer);
+
+  stage.addEventListener('wheel', (event) => {
+    if (!els.photoDialog?.open) return;
+    event.preventDefault();
+    const delta = event.deltaY > 0 ? -0.22 : 0.22;
+    setPhotoZoom(photoZoom + delta, { x: event.clientX, y: event.clientY });
+  }, { passive: false });
+}
+
 async function openPhoto(photoId, ids = null) {
   if (Array.isArray(ids) && ids.length) photoViewerIds = ids.slice();
   if (!photoViewerIds.includes(photoId)) {
@@ -541,6 +748,7 @@ async function renderPhotoDialogContent() {
   if (currentPreviewUrl) URL.revokeObjectURL(currentPreviewUrl);
   currentPreviewUrl = URL.createObjectURL(photo.blob);
   els.photoPreview.src = currentPreviewUrl;
+  resetPhotoZoom();
   els.photoNote.value = photo.note || '';
   const total = photoViewerIds.length || 1;
   const humanIndex = selectedPhotoIndex >= 0 ? selectedPhotoIndex + 1 : 1;
@@ -643,7 +851,7 @@ async function syncFoldersSafe() {
 }
 
 function isLocalChangePending(photo) {
-  return ['pending', 'deletePending'].includes(photo.syncStatus);
+  return ['pending', 'failed', 'deletePending'].includes(photo.syncStatus) || Boolean(photo.previousRemotePath);
 }
 
 async function fetchCloudState(apiBase, appPassword) {
@@ -946,6 +1154,25 @@ async function buildPhotoMetadata(photo) {
   };
 }
 
+async function cleanupMovedRemotePhoto(photo, newRemotePath, newRemoteMetaPath, apiBase, appPassword) {
+  const oldRemotePath = photo.previousRemotePath || '';
+  if (!oldRemotePath || oldRemotePath === newRemotePath) return;
+
+  const res = await fetchWithTimeout(`${apiBase}/cleanup-moved-photo`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-app-password': appPassword },
+    body: JSON.stringify({
+      id: photo.id,
+      oldRemotePath,
+      oldRemoteMetaPath: photo.previousRemoteMetaPath || `${oldRemotePath}.json`,
+      newRemotePath,
+      newRemoteMetaPath
+    })
+  }, 60000);
+  const body = await safeJson(res);
+  if (!res.ok) throw new Error(body?.error || body?.message || res.statusText || '清理旧 GitHub 路径失败');
+}
+
 async function uploadPhoto(photo, apiBase, appPassword) {
   const metadata = await buildPhotoMetadata(photo);
   const fd = new FormData();
@@ -959,12 +1186,17 @@ async function uploadPhoto(photo, apiBase, appPassword) {
     }, 90000);
     const body = await safeJson(res);
     if (!res.ok) throw new Error(body?.error || body?.message || res.statusText);
+
+    await cleanupMovedRemotePhoto(photo, body.remotePath, body.remoteMetaPath, apiBase, appPassword);
+
     photo.syncStatus = 'synced';
     photo.remotePath = body.remotePath;
     photo.remoteMetaPath = body.remoteMetaPath;
     photo.remoteSyncedAt = new Date().toISOString();
     photo.lastError = '';
     photo.retryCount = 0;
+    delete photo.previousRemotePath;
+    delete photo.previousRemoteMetaPath;
     await dbPut('photos', photo);
   } catch (err) {
     photo.syncStatus = 'failed';
@@ -1139,6 +1371,10 @@ async function init() {
   if (els.nextPhotoBtn) els.nextPhotoBtn.onclick = () => switchPhoto(1);
   if (els.prevPhotoTextBtn) els.prevPhotoTextBtn.onclick = () => switchPhoto(-1);
   if (els.nextPhotoTextBtn) els.nextPhotoTextBtn.onclick = () => switchPhoto(1);
+  if (els.zoomOutBtn) els.zoomOutBtn.onclick = () => changePhotoZoom(-0.5);
+  if (els.zoomResetBtn) els.zoomResetBtn.onclick = resetPhotoZoom;
+  if (els.zoomInBtn) els.zoomInBtn.onclick = () => changePhotoZoom(0.5);
+  installPhotoZoomHandlers();
   els.saveNoteBtn.onclick = saveSelectedNote;
   els.deletePhotoBtn.onclick = softDeleteSelectedPhoto;
 
@@ -1146,6 +1382,7 @@ async function init() {
     if (currentPreviewUrl) { URL.revokeObjectURL(currentPreviewUrl); currentPreviewUrl = ''; }
     selectedPhotoId = null;
     selectedPhotoIndex = -1;
+    resetPhotoZoom();
   });
 
   window.addEventListener('online', () => syncNow(false));

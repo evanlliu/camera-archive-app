@@ -19,6 +19,7 @@ export default {
       if (url.pathname === '/file' && request.method === 'GET') return handleGetFile(request, env);
       if (url.pathname === '/upload' && request.method === 'POST') return handleUpload(request, env);
       if (url.pathname === '/photo' && request.method === 'DELETE') return handleDeletePhoto(request, env);
+      if (url.pathname === '/cleanup-moved-photo' && request.method === 'POST') return handleCleanupMovedPhoto(request, env);
       if (url.pathname === '/folders' && (request.method === 'PUT' || request.method === 'POST')) return handlePutFolders(request, env);
       if (url.pathname === '/folders' && request.method === 'GET') return handleGetFolders(request, env);
       if (url.pathname === '/remote-index' && request.method === 'GET') return handleRemoteIndex(request, env);
@@ -62,18 +63,24 @@ async function handleCloudState(request, env) {
     .filter(x => x.type === 'blob' && x.path.startsWith('deletions/') && x.path.endsWith('.json'))
     .sort((a, b) => a.path.localeCompare(b.path));
 
-  const photos = [];
+  const photoById = new Map();
   const skipped = [];
   for (const item of photoMetaFiles) {
     try {
       const text = await getGitBlobText(env, item.sha);
       const meta = JSON.parse(text);
-      if (meta?.id && meta?.remotePath) photos.push(meta);
-      else skipped.push({ path: item.path, reason: 'metadata missing id or remotePath' });
+      if (meta?.id && meta?.remotePath) {
+        meta.remoteMetaPath = meta.remoteMetaPath || item.path;
+        const current = photoById.get(meta.id);
+        if (!current || isRemoteMetaNewer(meta, current)) photoById.set(meta.id, meta);
+      } else {
+        skipped.push({ path: item.path, reason: 'metadata missing id or remotePath' });
+      }
     } catch (err) {
       skipped.push({ path: item.path, reason: err.message || String(err) });
     }
   }
+  const photos = [...photoById.values()].sort((a, b) => String(a.remotePath).localeCompare(String(b.remotePath)));
 
   const deletions = [];
   for (const item of deletionFiles) {
@@ -179,6 +186,30 @@ async function handleDeletePhoto(request, env) {
   return corsResponse(env, { ok: true, deleted, missing, tombstone }, 200, request);
 }
 
+async function handleCleanupMovedPhoto(request, env) {
+  const body = await request.json();
+  const oldRemotePath = normalizeRepoPath(body.oldRemotePath || '');
+  const oldRemoteMetaPath = normalizeRepoPath(body.oldRemoteMetaPath || `${oldRemotePath}.json`);
+  const newRemotePath = normalizeRepoPath(body.newRemotePath || '');
+  const newRemoteMetaPath = normalizeRepoPath(body.newRemoteMetaPath || `${newRemotePath}.json`);
+  if (!oldRemotePath) return corsResponse(env, { error: 'oldRemotePath required' }, 400, request);
+
+  const deleted = [];
+  const missing = [];
+  const skipped = [];
+  for (const path of [oldRemoteMetaPath, oldRemotePath]) {
+    if (!path || path === newRemotePath || path === newRemoteMetaPath) {
+      skipped.push(path);
+      continue;
+    }
+    const result = await deleteFileIfExists(env, path, `Cleanup moved photo ${body.id || oldRemotePath}`);
+    if (result === 'deleted') deleted.push(path);
+    if (result === 'missing') missing.push(path);
+  }
+
+  return corsResponse(env, { ok: true, deleted, missing, skipped }, 200, request);
+}
+
 async function handlePutFolders(request, env) {
   const body = await request.json();
   if (!Array.isArray(body.folders)) return corsResponse(env, { error: 'folders array required' }, 400, request);
@@ -243,6 +274,13 @@ async function getGitBlob(env, sha) {
 async function getGitBlobText(env, sha) {
   const bytes = await getGitBlob(env, sha);
   return new TextDecoder().decode(bytes);
+}
+
+function isRemoteMetaNewer(next, current) {
+  const nextTime = Date.parse(next.uploadedAt || next.updatedAt || next.createdAt || 0) || 0;
+  const currentTime = Date.parse(current.uploadedAt || current.updatedAt || current.createdAt || 0) || 0;
+  if (nextTime !== currentTime) return nextTime > currentTime;
+  return String(next.remotePath || '').localeCompare(String(current.remotePath || '')) > 0;
 }
 
 function guessContentType(path) {
