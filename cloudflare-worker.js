@@ -15,10 +15,11 @@ export default {
       if (authError) return corsResponse(env, { error: authError }, 401, request);
 
       if (url.pathname === '/health' && request.method === 'GET') return handleHealth(request, env);
-      if (url.pathname === '/write-check' && request.method === 'POST') return handleWriteCheck(request, env);
+      if (url.pathname === '/cloud-state' && request.method === 'GET') return handleCloudState(request, env);
+      if (url.pathname === '/file' && request.method === 'GET') return handleGetFile(request, env);
       if (url.pathname === '/upload' && request.method === 'POST') return handleUpload(request, env);
       if (url.pathname === '/photo' && request.method === 'DELETE') return handleDeletePhoto(request, env);
-      if (url.pathname === '/folders' && request.method === 'PUT') return handlePutFolders(request, env);
+      if (url.pathname === '/folders' && (request.method === 'PUT' || request.method === 'POST')) return handlePutFolders(request, env);
       if (url.pathname === '/folders' && request.method === 'GET') return handleGetFolders(request, env);
       if (url.pathname === '/remote-index' && request.method === 'GET') return handleRemoteIndex(request, env);
 
@@ -41,51 +42,75 @@ async function handleHealth(request, env) {
   const owner = required(env.GITHUB_OWNER, 'GITHUB_OWNER');
   const repo = required(env.GITHUB_REPO, 'GITHUB_REPO');
   const branch = env.GITHUB_BRANCH || 'main';
-  required(env.GITHUB_TOKEN, 'GITHUB_TOKEN');
+  const url = `${GH_API}/repos/${owner}/${repo}?ref=${encodeURIComponent(branch)}`;
+  const res = await ghFetch(env, url);
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok) return corsResponse(env, { ok: false, error: json.message || `GitHub ${res.status}` }, res.status, request);
+  return corsResponse(env, { ok: true, repo: `${owner}/${repo}`, branch }, 200, request);
+}
 
-  const repoUrl = `${GH_API}/repos/${owner}/${repo}`;
-  const repoRes = await ghFetch(env, repoUrl);
-  const repoJson = await repoRes.json().catch(() => ({}));
-  if (!repoRes.ok) {
-    return corsResponse(env, {
-      ok: false,
-      worker: true,
-      github: false,
-      error: `GitHub repo check failed: ${repoRes.status} ${repoJson.message || ''}`.trim()
-    }, repoRes.status, request);
+async function handleCloudState(request, env) {
+  const [foldersPayload, tree] = await Promise.all([
+    getFoldersPayload(env),
+    listGitTree(env)
+  ]);
+
+  const photoMetaFiles = tree
+    .filter(x => x.type === 'blob' && x.path.startsWith('photos/') && x.path.endsWith('.json'))
+    .sort((a, b) => a.path.localeCompare(b.path));
+  const deletionFiles = tree
+    .filter(x => x.type === 'blob' && x.path.startsWith('deletions/') && x.path.endsWith('.json'))
+    .sort((a, b) => a.path.localeCompare(b.path));
+
+  const photos = [];
+  const skipped = [];
+  for (const item of photoMetaFiles) {
+    try {
+      const text = await getGitBlobText(env, item.sha);
+      const meta = JSON.parse(text);
+      if (meta?.id && meta?.remotePath) photos.push(meta);
+      else skipped.push({ path: item.path, reason: 'metadata missing id or remotePath' });
+    } catch (err) {
+      skipped.push({ path: item.path, reason: err.message || String(err) });
+    }
+  }
+
+  const deletions = [];
+  for (const item of deletionFiles) {
+    try {
+      const text = await getGitBlobText(env, item.sha);
+      const deletion = JSON.parse(text);
+      if (deletion?.id || deletion?.remotePath) deletions.push(deletion);
+    } catch (err) {
+      skipped.push({ path: item.path, reason: err.message || String(err) });
+    }
   }
 
   return corsResponse(env, {
     ok: true,
-    worker: true,
-    github: true,
-    repo: `${owner}/${repo}`,
-    private: Boolean(repoJson.private),
-    branch,
-    maxUploadMb: Number(env.MAX_UPLOAD_MB || 50),
-    workerVersion: '1.2-write-check'
+    refreshedAt: new Date().toISOString(),
+    folders: foldersPayload.folders || [],
+    foldersUpdatedAt: foldersPayload.updatedAt || null,
+    photos,
+    deletions,
+    skipped,
+    count: {
+      folders: (foldersPayload.folders || []).length,
+      photos: photos.length,
+      deletions: deletions.length,
+      skipped: skipped.length
+    }
   }, 200, request);
 }
 
-async function handleWriteCheck(request, env) {
-  const owner = required(env.GITHUB_OWNER, 'GITHUB_OWNER');
-  const repo = required(env.GITHUB_REPO, 'GITHUB_REPO');
-  const branch = env.GITHUB_BRANCH || 'main';
-  const body = await request.json().catch(() => ({}));
-  const now = new Date().toISOString();
-  const payload = {
-    ok: true,
-    app: 'scene-camera-pwa',
-    check: 'github-write',
-    repo: `${owner}/${repo}`,
-    branch,
-    checkedAt: body.checkedAt || now,
-    workerTime: now,
-    workerVersion: '1.2-write-check'
-  };
-  const remotePath = '.system/healthcheck.json';
-  await putOrUpdateFile(env, remotePath, JSON.stringify(payload, null, 2), 'Worker write check');
-  return corsResponse(env, { ok: true, repo: `${owner}/${repo}`, branch, remotePath, checkedAt: now }, 200, request);
+async function handleGetFile(request, env) {
+  const url = new URL(request.url);
+  const path = normalizeRepoPath(url.searchParams.get('path') || '');
+  if (!path) return corsResponse(env, { error: 'path required' }, 400, request);
+  const info = await getGitHubContent(env, path);
+  if (!info?.sha) return corsResponse(env, { error: 'File not found' }, 404, request);
+  const blob = await getGitBlob(env, info.sha);
+  return binaryCorsResponse(env, blob.buffer, 200, request, guessContentType(path));
 }
 
 async function handleUpload(request, env) {
@@ -139,7 +164,19 @@ async function handleDeletePhoto(request, env) {
     if (result === 'deleted') deleted.push(path);
     if (result === 'missing') missing.push(path);
   }
-  return corsResponse(env, { ok: true, deleted, missing }, 200, request);
+
+  const tombstone = {
+    id: body.id || '',
+    remotePath,
+    remoteMetaPath,
+    deletedAt: body.deletedAt || new Date().toISOString(),
+    deletedBy: 'camera-archive-app',
+    workerVersion: 2
+  };
+  const tombstoneId = tombstone.id || safeIdFromPath(remotePath);
+  await putOrUpdateFile(env, `deletions/${tombstoneId}.json`, JSON.stringify(tombstone, null, 2), `Record deletion ${tombstoneId}`);
+
+  return corsResponse(env, { ok: true, deleted, missing, tombstone }, 200, request);
 }
 
 async function handlePutFolders(request, env) {
@@ -156,10 +193,8 @@ async function handlePutFolders(request, env) {
 }
 
 async function handleGetFolders(request, env) {
-  const file = await getGitHubContent(env, 'folders.json');
-  if (!file) return corsResponse(env, { folders: [], updatedAt: null }, 200, request);
-  const text = utf8FromBase64(file.content || '');
-  return corsResponse(env, JSON.parse(text), 200, request);
+  const payload = await getFoldersPayload(env);
+  return corsResponse(env, payload, 200, request);
 }
 
 async function handleRemoteIndex(request, env) {
@@ -174,6 +209,54 @@ async function handleRemoteIndex(request, env) {
     .filter(x => x.type === 'blob' && (x.path.endsWith('.jpg') || x.path.endsWith('.jpeg') || x.path.endsWith('.png') || x.path.endsWith('.heic') || x.path.endsWith('.json')))
     .map(x => ({ path: x.path, size: x.size, sha: x.sha }));
   return corsResponse(env, { ok: true, files }, 200, request);
+}
+
+async function getFoldersPayload(env) {
+  const file = await getGitHubContent(env, 'folders.json');
+  if (!file) return { folders: [], updatedAt: null };
+  const text = await getGitBlobText(env, file.sha);
+  return JSON.parse(text);
+}
+
+async function listGitTree(env) {
+  const owner = required(env.GITHUB_OWNER, 'GITHUB_OWNER');
+  const repo = required(env.GITHUB_REPO, 'GITHUB_REPO');
+  const branch = env.GITHUB_BRANCH || 'main';
+  const url = `${GH_API}/repos/${owner}/${repo}/git/trees/${encodeURIComponent(branch)}?recursive=1`;
+  const res = await ghFetch(env, url);
+  const json = await res.json();
+  if (!res.ok) throw new Error(`GitHub tree failed: ${res.status} ${json.message || ''}`);
+  return json.tree || [];
+}
+
+async function getGitBlob(env, sha) {
+  const owner = required(env.GITHUB_OWNER, 'GITHUB_OWNER');
+  const repo = required(env.GITHUB_REPO, 'GITHUB_REPO');
+  const url = `${GH_API}/repos/${owner}/${repo}/git/blobs/${encodeURIComponent(sha)}`;
+  const res = await ghFetch(env, url);
+  const json = await res.json();
+  if (!res.ok) throw new Error(`GitHub blob ${sha} failed: ${res.status} ${json.message || ''}`);
+  if (json.encoding !== 'base64' || !json.content) throw new Error(`GitHub blob ${sha} has unsupported encoding`);
+  return base64ToUint8Array(json.content);
+}
+
+async function getGitBlobText(env, sha) {
+  const bytes = await getGitBlob(env, sha);
+  return new TextDecoder().decode(bytes);
+}
+
+function guessContentType(path) {
+  const p = String(path).toLowerCase();
+  if (p.endsWith('.png')) return 'image/png';
+  if (p.endsWith('.gif')) return 'image/gif';
+  if (p.endsWith('.webp')) return 'image/webp';
+  if (p.endsWith('.heic')) return 'image/heic';
+  if (p.endsWith('.heif')) return 'image/heif';
+  return 'image/jpeg';
+}
+
+function safeIdFromPath(path) {
+  return normalizeRepoPath(path).replace(/[^a-zA-Z0-9_-]+/g, '_').slice(0, 120) || 'unknown';
 }
 
 function validateMetadata(m) {
@@ -240,18 +323,29 @@ function ghFetch(env, url, init = {}) {
 }
 
 function corsResponse(env, data, status = 200, request) {
+  const headers = corsHeaders(env, request);
+  if (status === 204) return new Response(null, { status, headers });
+  headers['content-type'] = 'application/json; charset=utf-8';
+  return new Response(JSON.stringify(data), { status, headers });
+}
+
+function corsHeaders(env, request) {
   const origin = request?.headers.get('origin') || '';
   const allowed = env.CORS_ORIGIN || '*';
   const allowOrigin = allowed === '*' ? '*' : (origin === allowed ? origin : allowed);
-  const headers = {
+  return {
     'access-control-allow-origin': allowOrigin,
     'access-control-allow-methods': 'GET,POST,PUT,DELETE,OPTIONS',
     'access-control-allow-headers': 'content-type,x-app-password',
     'access-control-max-age': '86400'
   };
-  if (status === 204) return new Response(null, { status, headers });
-  headers['content-type'] = 'application/json; charset=utf-8';
-  return new Response(JSON.stringify(data), { status, headers });
+}
+
+function binaryCorsResponse(env, data, status = 200, request, contentType = 'application/octet-stream') {
+  const headers = corsHeaders(env, request);
+  headers['content-type'] = contentType;
+  headers['cache-control'] = 'private, max-age=60';
+  return new Response(data, { status, headers });
 }
 
 function required(value, name) {
@@ -272,6 +366,14 @@ function normalizeRepoPath(path) {
 
 function encodePath(path) {
   return normalizeRepoPath(path).split('/').map(encodeURIComponent).join('/');
+}
+
+function base64ToUint8Array(base64) {
+  const clean = String(base64 || '').replace(/\s/g, '');
+  const binary = atob(clean);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
 }
 
 function arrayBufferToBase64(buffer) {

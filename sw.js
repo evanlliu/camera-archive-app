@@ -1,4 +1,4 @@
-const CACHE_NAME = 'camera-archive-app-static-v2';
+const CACHE_NAME = 'camera-archive-app-static-cloud-v1';
 const CORE_ASSETS = [
   './',
   './index.html',

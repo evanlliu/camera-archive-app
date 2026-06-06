@@ -29,6 +29,8 @@ const els = {
   apiBaseInput: $('apiBaseInput'),
   appPasswordInput: $('appPasswordInput'),
   saveSettingsBtn: $('saveSettingsBtn'),
+  testConnectionBtn: $('testConnectionBtn'),
+  settingsStatus: $('settingsStatus'),
   photoDialog: $('photoDialog'),
   photoPreview: $('photoPreview'),
   photoNote: $('photoNote'),
@@ -132,6 +134,16 @@ function safeSegment(input) {
     .replace(/[\\/:*?"<>|#%{}^~\[\]`;&]/g, '_')
     .replace(/\s+/g, '_')
     .slice(0, 80) || '未命名';
+}
+
+function stableHash(input) {
+  let h = 2166136261;
+  const text = String(input || '');
+  for (let i = 0; i < text.length; i++) {
+    h ^= text.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return (h >>> 0).toString(36);
 }
 
 function formatBytes(n = 0) {
@@ -365,7 +377,11 @@ async function renderPhotos(photos = null) {
     const url = URL.createObjectURL(blob);
     lastObjectUrls.push(url);
     const badgeClass = photo.syncStatus === 'synced' ? 'synced' : photo.syncStatus === 'failed' ? 'failed' : 'pending';
-    const badgeText = photo.syncStatus === 'synced' ? '已同步' : photo.syncStatus === 'failed' ? '失败' : '待同步';
+    const badgeText = photo.syncStatus === 'synced' ? '已同步'
+      : photo.syncStatus === 'failed' ? '失败'
+      : photo.syncStatus === 'cloudOnly' ? '云端'
+      : photo.syncStatus === 'cloudMissing' ? '本地保留'
+      : '待同步';
     const img = document.createElement('img');
     img.alt = '照片';
     img.src = url;
@@ -512,23 +528,251 @@ async function showSettings() {
 async function saveSettings() {
   await setSetting('apiBase', els.apiBaseInput.value.trim().replace(/\/+$/, ''));
   await setSetting('appPassword', els.appPasswordInput.value);
+  if (els.settingsStatus) {
+    els.settingsStatus.hidden = false;
+    els.settingsStatus.textContent = '设置已保存。下次打开会默认先从云端加载。';
+  }
   await render();
+}
+
+async function testConnection() {
+  const apiBase = els.apiBaseInput.value.trim().replace(/\/+$/, '');
+  const appPassword = els.appPasswordInput.value;
+  if (!apiBase || !appPassword) {
+    if (els.settingsStatus) {
+      els.settingsStatus.hidden = false;
+      els.settingsStatus.textContent = '请先填写 Cloudflare Worker 地址和 App 密码。';
+    }
+    return;
+  }
+  if (els.settingsStatus) {
+    els.settingsStatus.hidden = false;
+    els.settingsStatus.textContent = '正在测试 Worker、密码、GitHub 读取和云端索引…';
+  }
+  try {
+    const state = await fetchCloudState(apiBase, appPassword);
+    await setSetting('apiBase', apiBase);
+    await setSetting('appPassword', appPassword);
+    if (els.settingsStatus) {
+      els.settingsStatus.textContent = `连接成功：云端 ${state.folders?.length || 0} 个分类，${state.photos?.length || 0} 张照片，设置已自动保存。`;
+    }
+  } catch (err) {
+    if (els.settingsStatus) els.settingsStatus.textContent = `连接失败：${err.message || err}`;
+  }
 }
 
 async function syncFoldersSafe() {
   try { await syncFolders(); } catch (err) { console.warn('sync folders failed', err); }
 }
 
+function isLocalChangePending(photo) {
+  return ['pending', 'deletePending'].includes(photo.syncStatus);
+}
+
+async function fetchCloudState(apiBase, appPassword) {
+  const res = await fetch(`${apiBase}/cloud-state`, {
+    method: 'GET',
+    headers: { 'x-app-password': appPassword }
+  });
+  const body = await safeJson(res);
+  if (!res.ok) throw new Error(body?.error || body?.message || res.statusText || 'Cloud state failed');
+  return body;
+}
+
+async function downloadCloudFile(apiBase, appPassword, remotePath) {
+  const res = await fetch(`${apiBase}/file?path=${encodeURIComponent(remotePath)}`, {
+    method: 'GET',
+    headers: { 'x-app-password': appPassword }
+  });
+  if (!res.ok) {
+    const body = await safeJson(res);
+    throw new Error(body?.error || body?.message || `下载云端照片失败：${res.status}`);
+  }
+  return res.blob();
+}
+
+async function mergeRemoteFolders(folders = []) {
+  await ensureRootFolder();
+  const localFolders = await dbAll('folders');
+  const localMap = new Map(localFolders.map(f => [f.id, f]));
+  const now = new Date().toISOString();
+  let changed = 0;
+  for (const folder of folders) {
+    if (!folder?.id) continue;
+    const normalized = {
+      id: folder.id,
+      name: folder.name || (folder.id === ROOT_ID ? '全部分类' : '未命名'),
+      parentId: folder.id === ROOT_ID ? null : (folder.parentId || ROOT_ID),
+      createdAt: folder.createdAt || now,
+      updatedAt: folder.updatedAt || folder.createdAt || now
+    };
+    const existing = localMap.get(normalized.id);
+    if (!existing || String(normalized.updatedAt) >= String(existing.updatedAt || '')) {
+      await dbPut('folders', { ...existing, ...normalized });
+      localMap.set(normalized.id, { ...existing, ...normalized });
+      changed++;
+    }
+  }
+  return changed;
+}
+
+async function ensureFolderForRemotePhoto(meta) {
+  if (!meta?.folderId || meta.folderId === ROOT_ID) return ROOT_ID;
+  const existing = await dbGet('folders', meta.folderId);
+  if (existing) return meta.folderId;
+
+  const names = Array.isArray(meta.folderPath) ? meta.folderPath.filter(Boolean) : [];
+  let parentId = ROOT_ID;
+  const now = new Date().toISOString();
+  for (let i = 0; i < names.length; i++) {
+    const isLast = i === names.length - 1;
+    const id = isLast ? meta.folderId : `cloud_folder_${stableHash(names.slice(0, i + 1).join('/'))}`;
+    const current = await dbGet('folders', id);
+    if (!current) {
+      await dbPut('folders', {
+        id,
+        name: names[i],
+        parentId,
+        createdAt: meta.createdAt || now,
+        updatedAt: meta.updatedAt || meta.createdAt || now
+      });
+    }
+    parentId = id;
+  }
+  if (!names.length && !await dbGet('folders', meta.folderId)) {
+    await dbPut('folders', {
+      id: meta.folderId,
+      name: '云端分类',
+      parentId: ROOT_ID,
+      createdAt: meta.createdAt || now,
+      updatedAt: meta.updatedAt || meta.createdAt || now
+    });
+  }
+  return meta.folderId;
+}
+
+async function mergeRemotePhotos(remotePhotos = [], deletions = [], apiBase, appPassword) {
+  const deletionIds = new Set((deletions || []).map(d => d.id).filter(Boolean));
+  const remotePaths = new Set(remotePhotos.map(p => p.remotePath).filter(Boolean));
+  let downloaded = 0;
+  let updated = 0;
+  let deleted = 0;
+
+  for (const meta of remotePhotos) {
+    if (!meta?.id || !meta.remotePath) continue;
+    if (deletionIds.has(meta.id)) continue;
+    await ensureFolderForRemotePhoto(meta);
+    const local = await dbGet('photos', meta.id);
+    if (local && isLocalChangePending(local)) continue;
+
+    let blob = local?.blob || null;
+    let thumbBlob = local?.thumbBlob || null;
+    const sameHash = local?.sha256 && meta.sha256 && String(local.sha256).toLowerCase() === String(meta.sha256).toLowerCase();
+    if (!blob || !sameHash) {
+      blob = await downloadCloudFile(apiBase, appPassword, meta.remotePath);
+      downloaded++;
+      try { thumbBlob = await makeThumbnail(blob); } catch { thumbBlob = null; }
+    }
+
+    const now = new Date().toISOString();
+    await dbPut('photos', {
+      ...(local || {}),
+      id: meta.id,
+      folderId: meta.folderId || local?.folderId || ROOT_ID,
+      filename: meta.filename || local?.filename || meta.remotePath.split('/').pop(),
+      blob,
+      thumbBlob,
+      mime: meta.mime || blob.type || local?.mime || 'image/jpeg',
+      size: meta.size || blob.size || local?.size || 0,
+      sha256: meta.sha256 || local?.sha256 || '',
+      note: meta.note || '',
+      createdAt: meta.createdAt || local?.createdAt || now,
+      updatedAt: meta.updatedAt || meta.uploadedAt || local?.updatedAt || now,
+      exportedAt: local?.exportedAt || null,
+      syncStatus: 'synced',
+      retryCount: 0,
+      lastError: '',
+      remotePath: meta.remotePath,
+      remoteMetaPath: meta.remoteMetaPath || `${meta.remotePath}.json`,
+      remoteSyncedAt: meta.uploadedAt || local?.remoteSyncedAt || now,
+      deletedAt: null
+    });
+    updated++;
+  }
+
+  const locals = await dbAll('photos');
+  for (const photo of locals) {
+    if (photo.deletedAt || isLocalChangePending(photo)) continue;
+    if (deletionIds.has(photo.id)) {
+      photo.deletedAt = new Date().toISOString();
+      photo.syncStatus = 'deletedSynced';
+      photo.lastError = '云端已删除，本地保留在回收站。';
+      await dbPut('photos', photo);
+      deleted++;
+      continue;
+    }
+    if (photo.remotePath && photo.syncStatus === 'synced' && !remotePaths.has(photo.remotePath)) {
+      // 不自动删除。云端缺失可能是仓库刚迁移、metadata 缺失或网络索引不完整。
+      // 为了保证数据不丢，本地副本继续显示，只提醒用户可再次同步补回云端。
+      photo.syncStatus = 'cloudMissing';
+      photo.lastError = '云端索引未找到这张照片，本地副本已保留；再次同步会尝试补回云端。';
+      await dbPut('photos', photo);
+    }
+  }
+  return { downloaded, updated, deleted };
+}
+
+async function refreshFromCloud(showNotice = true) {
+  const { apiBase, appPassword } = await getSyncConfig();
+  if (!apiBase || !appPassword) return { skipped: true };
+  if (showNotice) setBusy(true, '正在从 GitHub 云端加载分类和照片，本地未同步照片会保留…');
+  try {
+    const state = await fetchCloudState(apiBase, appPassword);
+    const folderChanged = await mergeRemoteFolders(state.folders || []);
+    const photoResult = await mergeRemotePhotos(state.photos || [], state.deletions || [], apiBase, appPassword);
+    await setSetting('lastCloudRefreshAt', new Date().toISOString());
+    if (showNotice) {
+      els.noticeBox.hidden = false;
+      els.noticeBox.textContent = `云端加载完成：${state.folders?.length || 0} 个分类，${state.photos?.length || 0} 张云端照片，新增下载 ${photoResult.downloaded} 张。`;
+    }
+    if (currentFolderId !== ROOT_ID && !await dbGet('folders', currentFolderId)) currentFolderId = ROOT_ID;
+    await render();
+    return { state, folderChanged, ...photoResult };
+  } catch (err) {
+    console.warn('refresh cloud failed', err);
+    if (showNotice) {
+      els.noticeBox.hidden = false;
+      els.noticeBox.textContent = `云端加载失败：${err.message || err}。本地照片已保留，不会丢失。`;
+    }
+    throw err;
+  } finally {
+    if (showNotice) setBusy(false);
+  }
+}
+
 async function syncFolders() {
   const { apiBase, appPassword } = await getSyncConfig();
   if (!apiBase || !appPassword) return false;
+
+  // 先合并云端 folders.json，避免当前设备用旧分类覆盖其他设备的新分类。
+  try {
+    const remote = await fetch(`${apiBase}/folders`, { headers: { 'x-app-password': appPassword } });
+    if (remote.ok) {
+      const body = await safeJson(remote);
+      await mergeRemoteFolders(body?.folders || []);
+    }
+  } catch (err) {
+    console.warn('load remote folders before push failed', err);
+  }
+
   const folders = await dbAll('folders');
   const res = await fetch(`${apiBase}/folders`, {
     method: 'PUT',
     headers: { 'content-type': 'application/json', 'x-app-password': appPassword },
     body: JSON.stringify({ folders, updatedAt: new Date().toISOString() })
   });
-  if (!res.ok) throw new Error(await res.text());
+  const body = await safeJson(res);
+  if (!res.ok) throw new Error(body?.error || body?.message || res.statusText || '同步分类失败');
   return true;
 }
 
@@ -540,17 +784,19 @@ async function syncNow(showAlert = true) {
     return;
   }
   syncRunning = true;
-  setBusy(true, '正在同步：先同步分类，再逐张上传/删除，失败会保留在本地队列…');
+  setBusy(true, '正在同步：先从云端加载，再上传/删除本地队列，失败会保留在本地…');
   try {
+    await refreshFromCloud(false);
     await syncFolders();
     const photos = (await dbAll('photos')).sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
     for (const photo of photos) {
-      if (photo.syncStatus === 'pending' || photo.syncStatus === 'failed') {
+      if (['pending', 'failed', 'cloudMissing'].includes(photo.syncStatus)) {
         await uploadPhoto(photo, apiBase, appPassword);
       } else if (photo.syncStatus === 'deletePending') {
         await deleteRemotePhoto(photo, apiBase, appPassword);
       }
     }
+    await refreshFromCloud(false);
     if (showAlert) alert('同步完成。失败的照片会继续保留在本地，可再次点击同步。');
   } catch (err) {
     console.error(err);
@@ -628,7 +874,7 @@ async function deleteRemotePhoto(photo, apiBase, appPassword) {
     const res = await fetch(`${apiBase}/photo`, {
       method: 'DELETE',
       headers: { 'content-type': 'application/json', 'x-app-password': appPassword },
-      body: JSON.stringify({ remotePath: photo.remotePath, remoteMetaPath: photo.remoteMetaPath })
+      body: JSON.stringify({ id: photo.id, remotePath: photo.remotePath, remoteMetaPath: photo.remoteMetaPath, deletedAt: new Date().toISOString() })
     });
     const body = await safeJson(res);
     if (!res.ok) throw new Error(body?.error || body?.message || res.statusText);
@@ -778,10 +1024,17 @@ async function init() {
   els.importInput.onchange = () => importZip(els.importInput.files?.[0]);
   els.settingsBtn.onclick = showSettings;
   els.saveSettingsBtn.onclick = saveSettings;
+  if (els.testConnectionBtn) els.testConnectionBtn.onclick = testConnection;
   els.saveNoteBtn.onclick = saveSelectedNote;
   els.deletePhotoBtn.onclick = softDeleteSelectedPhoto;
 
   window.addEventListener('online', () => syncNow(false));
+
+  const { apiBase, appPassword } = await getSyncConfig();
+  if (apiBase && appPassword) {
+    // 每次打开默认以云端为准先加载，同时保留本地未同步照片，避免数据丢失。
+    syncNow(false).catch(err => console.warn('startup cloud sync failed', err));
+  }
 }
 
 init().catch(err => {

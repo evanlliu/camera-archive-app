@@ -104,7 +104,11 @@
         App 密码
         <input id="appPasswordInput" type="password" placeholder="Worker 里的 APP_PASSWORD" autocomplete="current-password" />
       </label>
-      <p class="hint">密码只保存在这台设备的浏览器本地。真正的 GitHub Token 只放在 Cloudflare Worker Secret 里。</p>
+      <div class="settings-actions">
+        <button id="testConnectionBtn" type="button">测试连接并读取云端</button>
+      </div>
+      <p id="settingsStatus" class="settings-status" hidden></p>
+      <p class="hint">密码只保存在这台设备的浏览器本地。真正的 GitHub Token 只放在 Cloudflare Worker Secret 里。保存后，每次打开会默认先加载 GitHub 云端数据。</p>
       <menu>
         <button value="cancel">取消</button>
         <button id="saveSettingsBtn" value="default" class="primary">保存</button>
