@@ -455,7 +455,31 @@ async function renderPhotos(photos = null) {
     badge.className = `badge ${badgeClass}`;
     badge.textContent = badgeText;
     btn.append(img, badge);
-    btn.onclick = () => openPhoto(photo.id, photoViewerIds);
+    btn.title = '点按原生全屏查看，长按打开备注/删除';
+    let longPressTimer = null;
+    let longPressOpened = false;
+    const clearLongPress = () => {
+      if (longPressTimer) clearTimeout(longPressTimer);
+      longPressTimer = null;
+    };
+    btn.addEventListener('pointerdown', () => {
+      longPressOpened = false;
+      clearLongPress();
+      longPressTimer = setTimeout(() => {
+        longPressOpened = true;
+        openPhoto(photo.id, photoViewerIds);
+      }, 650);
+    });
+    btn.addEventListener('pointerup', clearLongPress);
+    btn.addEventListener('pointercancel', clearLongPress);
+    btn.addEventListener('pointerleave', clearLongPress);
+    btn.onclick = () => {
+      if (longPressOpened) {
+        longPressOpened = false;
+        return;
+      }
+      openNativePhoto(photo);
+    };
     els.photoGrid.append(btn);
   }
 }
@@ -588,6 +612,34 @@ function setBusy(isBusy, label = '') {
     els.noticeBox.hidden = false;
     els.noticeBox.textContent = label;
   }
+}
+
+
+function openNativePhoto(photo) {
+  if (!photo?.blob) {
+    alert('这张照片还没有下载到本机，先同步云端后再打开。');
+    return;
+  }
+  const url = URL.createObjectURL(photo.blob);
+  const opened = window.open(url, '_blank', 'noopener,noreferrer');
+  if (!opened) {
+    const a = document.createElement('a');
+    a.href = url;
+    a.target = '_blank';
+    a.rel = 'noopener noreferrer';
+    a.textContent = '打开图片';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  }
+  // 不要立刻 revoke，否则 iOS 新页面可能还没完成加载。延迟释放即可。
+  setTimeout(() => URL.revokeObjectURL(url), 10 * 60 * 1000);
+}
+
+async function openNativePhotoById(photoId) {
+  const photo = await dbGet('photos', photoId);
+  if (!photo) return;
+  openNativePhoto(photo);
 }
 
 
@@ -1374,6 +1426,7 @@ async function init() {
   if (els.zoomOutBtn) els.zoomOutBtn.onclick = () => changePhotoZoom(-0.5);
   if (els.zoomResetBtn) els.zoomResetBtn.onclick = resetPhotoZoom;
   if (els.zoomInBtn) els.zoomInBtn.onclick = () => changePhotoZoom(0.5);
+  if (els.photoPreview) els.photoPreview.ondblclick = () => selectedPhotoId && openNativePhotoById(selectedPhotoId);
   installPhotoZoomHandlers();
   els.saveNoteBtn.onclick = saveSelectedNote;
   els.deletePhotoBtn.onclick = softDeleteSelectedPhoto;
