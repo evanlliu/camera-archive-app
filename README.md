@@ -1,18 +1,18 @@
 # camera-archive-app 前端仓库
 
-这是 GitHub Pages 前端代码，建议放在公开仓库：
+这个目录是 GitHub Pages 前端代码，建议放在公开仓库：
 
 ```text
 camera-archive-app
 ```
 
-部署后访问地址：
+部署后访问地址会是：
 
 ```text
 https://evanlliu.github.io/camera-archive-app/
 ```
 
-照片不要放在这个仓库。照片数据仓库仍然是私有仓库：
+注意：照片不要放在这个仓库。照片数据仓库仍然是私有仓库：
 
 ```text
 camera-archive-private
