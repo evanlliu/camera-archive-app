@@ -1,38 +1,148 @@
-# 场景相机前端
+# 场景相机
 
-这是纯静态 PWA，直接放到 GitHub Pages 即可。
+这是一个适合 iPhone Safari「添加到主屏幕」使用的 PWA 相机应用。
 
-部署后，打开网页：
-1. 在 Safari 中访问 GitHub Pages 地址。
-2. 分享按钮 → 添加到主屏幕。
-3. 第一次打开后进入“设置”，填写 Cloudflare Worker 地址和 App 密码。
+照片保存策略：
 
-照片会先保存到 IndexedDB，再同步到 Worker/GitHub。不要把 Safari 网站数据当唯一备份；请定期导出 ZIP。
+1. 拍照后先写入本机 IndexedDB，本地保存成功后才进入同步队列。
+2. 点击同步后，前端把照片发给 Cloudflare Worker。
+3. Cloudflare Worker 使用 Secret 中的 GitHub Token 写入 GitHub 私有仓库。
+4. 同步失败不会删除本地照片，照片会继续保留在待同步队列。
+5. 可以导出 ZIP 作为额外备份，也可以从 ZIP 导入恢复。
 
-## 文件说明
+## 文件结构
 
-这个仓库采用扁平结构：
+这个包已经整理成单层结构，可以直接上传到 GitHub 前端仓库根目录：
 
-- `index.html` / `app.js` / `styles.css` / `sw.js` / `manifest.webmanifest` / `icons/`：GitHub Pages 前端代码
-- `cloudflare-worker.js`：Cloudflare Worker 代码备份；复制它的全部内容到 Cloudflare Workers 的 `Edit code` 里部署
-- `wrangler.toml` / `worker-package.json`：可选，仅用于本地 Wrangler 部署参考
+```text
+index.html                 前端入口，必须在仓库根目录
+app.js                     前端主逻辑
+styles.css                 前端样式
+sw.js                      PWA 离线缓存
+manifest.webmanifest       PWA 配置
+icons/                     App 图标
+.nojekyll                  让 GitHub Pages 按静态文件发布
+cloudflare-worker.js       Cloudflare Worker 代码备份，复制到 Cloudflare Edit code 部署
+wrangler.toml              可选，Wrangler 部署参考
+worker-package.json        可选，Wrangler package.json 参考
+README.md                  本说明
+```
 
-## GitHub Pages 上传注意
+## GitHub 仓库建议
 
-`index.html` 必须放在仓库根目录，不要把 `app.js` 的内容放进 `index.html`。
+建议使用两个仓库：
 
-## Cloudflare Worker 环境变量
+```text
+camera-archive-app          Public，放本项目全部前端代码和 cloudflare-worker.js 备份
+camera-archive-private      Private，只放照片、folders.json 和照片 metadata
+```
 
-Plaintext:
+`camera-archive-private` 必须是 Private。
 
-- `CORS_ORIGIN=https://evanlliu.github.io`
-- `GITHUB_BRANCH=main`
-- `GITHUB_OWNER=evanlliu`
-- `GITHUB_REPO=camera-archive-private`
-- `MAX_UPLOAD_MB=50`
+## GitHub Pages 部署
 
-Secrets:
+把本包里的所有文件上传到 `camera-archive-app` 仓库根目录。
 
-- `APP_PASSWORD`
-- `GITHUB_TOKEN`
+正确结构应该是：
 
+```text
+camera-archive-app/
+├── index.html
+├── app.js
+├── styles.css
+├── sw.js
+├── manifest.webmanifest
+├── icons/
+├── .nojekyll
+├── cloudflare-worker.js
+├── wrangler.toml
+├── worker-package.json
+└── README.md
+```
+
+不要上传成：
+
+```text
+camera-archive-app/camera-archive-app/index.html
+```
+
+也不要把 `app.js` 的内容放进 `index.html`。
+
+进入仓库：
+
+```text
+Settings → Pages → Deploy from a branch → main / root → Save
+```
+
+前端地址类似：
+
+```text
+https://evanlliu.github.io/camera-archive-app/
+```
+
+## Cloudflare Worker 部署
+
+进入 Cloudflare：
+
+```text
+Workers & Pages → camera-archive-data-worker → Edit code
+```
+
+把 `cloudflare-worker.js` 的全部内容复制进去，然后点击：
+
+```text
+Save and deploy
+```
+
+Worker 根地址打开后应该返回：
+
+```json
+{"ok":true,"service":"scene-camera-worker"}
+```
+
+## Cloudflare 变量
+
+Plaintext：
+
+```text
+CORS_ORIGIN=https://evanlliu.github.io
+GITHUB_BRANCH=main
+GITHUB_OWNER=evanlliu
+GITHUB_REPO=camera-archive-private
+MAX_UPLOAD_MB=50
+```
+
+Secrets：
+
+```text
+APP_PASSWORD
+GITHUB_TOKEN
+```
+
+`GITHUB_TOKEN` 建议使用 fine-grained token，只给 `camera-archive-private` 仓库 `Contents: Read and write` 权限。
+
+## App 设置
+
+打开网页 App 后进入「设置」：
+
+```text
+Cloudflare Worker 地址：https://你的-worker.workers.dev
+App 密码：Cloudflare Secret 里的 APP_PASSWORD
+```
+
+然后点击「测试连接」。测试通过后再点击「同步」。
+
+## 更新代码时的注意事项
+
+更新 GitHub Pages 代码不会删除本地照片，因为照片在 Safari 的 IndexedDB 里。
+
+不要做这些操作：
+
+```text
+不要清 Safari 网站数据
+不要删除站点数据
+不要改前端域名
+不要随便修改 app.js 里的 DB_NAME
+```
+
+建议定期点击「导出 ZIP」，把备份保存到 iCloud Drive 或文件 App。
