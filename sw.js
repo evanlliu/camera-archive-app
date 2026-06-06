@@ -1,4 +1,4 @@
-const CACHE_NAME = 'scene-camera-static-v1';
+const CACHE_NAME = 'scene-camera-static-v1.2';
 const CORE_ASSETS = [
   './',
   './index.html',

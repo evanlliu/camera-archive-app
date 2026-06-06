@@ -146,3 +146,14 @@ App 密码：Cloudflare Secret 里的 APP_PASSWORD
 ```
 
 建议定期点击「导出 ZIP」，把备份保存到 iCloud Drive 或文件 App。
+
+
+## v1.2 修复说明
+
+- 设置里的“测试连接”现在会额外调用 `/write-check`，确认 GitHub Token 不只是能读取仓库，也能写入仓库。
+- “测试连接”成功后会自动保存当前 Worker 地址和 App 密码，避免测试成功但同步仍使用旧地址。
+- 同步分类失败时会显示更明确的错误信息。
+
+Cloudflare Worker 更新时，复制根目录的 `cloudflare-worker.js` 到 Cloudflare 的 Edit code 后 Save and deploy。
+
+GitHub Pages 更新时，把本目录全部文件上传到 `camera-archive-app` 仓库根目录。

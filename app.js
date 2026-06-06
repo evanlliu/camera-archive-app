@@ -554,11 +554,29 @@ async function testConnection() {
 
     const health = await healthRes.json();
     const repo = health.repo || 'GitHub 仓库';
-    setTestResult(`连接成功：Worker 正常，密码有效，GitHub 仓库 ${repo} 可访问。`, 'ok');
+
+    const writeRes = await fetch(`${apiBase}/write-check`, {
+      method: 'POST',
+      cache: 'no-store',
+      headers: { 'content-type': 'application/json', 'x-app-password': appPassword },
+      body: JSON.stringify({ checkedAt: new Date().toISOString() })
+    });
+    if (writeRes.status === 404) {
+      throw new Error('Worker 还不是新版：缺少 /write-check。请把压缩包里的 cloudflare-worker.js 复制到 Cloudflare 后重新 Deploy。');
+    }
+    if (!writeRes.ok) {
+      const msg = await readResponseText(writeRes);
+      throw new Error(`GitHub 写入测试失败：${writeRes.status} ${msg}`);
+    }
+
+    await setSetting('apiBase', apiBase);
+    await setSetting('appPassword', appPassword);
+    await updateStorageLine();
+    setTestResult(`连接成功：Worker 正常，App 密码有效，GitHub 仓库 ${repo} 读写正常。已自动保存当前设置，可以直接同步。`, 'ok');
   } catch (err) {
     const msg = err?.message || String(err);
     if (msg.includes('Load failed') || msg.includes('Failed to fetch')) {
-      setTestResult('连接失败：浏览器无法访问 Worker。请检查 Worker 地址、Cloudflare 是否已部署、CORS_ORIGIN 是否为 https://evanlliu.github.io。', 'error');
+      setTestResult('连接失败：浏览器无法访问 Worker。请检查 Worker 地址、Cloudflare 是否已部署、CORS_ORIGIN 是否为 https://evanlliu.github.io，并确认前端页面不是旧缓存。', 'error');
     } else {
       setTestResult(`连接失败：${msg}`, 'error');
     }
@@ -575,12 +593,20 @@ async function syncFolders() {
   const { apiBase, appPassword } = await getSyncConfig();
   if (!apiBase || !appPassword) return false;
   const folders = await dbAll('folders');
-  const res = await fetch(`${apiBase}/folders`, {
-    method: 'PUT',
-    headers: { 'content-type': 'application/json', 'x-app-password': appPassword },
-    body: JSON.stringify({ folders, updatedAt: new Date().toISOString() })
-  });
-  if (!res.ok) throw new Error(await res.text());
+  let res;
+  try {
+    res = await fetch(`${apiBase}/folders`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json', 'x-app-password': appPassword },
+      body: JSON.stringify({ folders, updatedAt: new Date().toISOString() })
+    });
+  } catch (err) {
+    throw new Error(`无法连接 Worker 写入分类：${err.message || err}。请重新打开设置，点“测试连接”；测试成功后会自动保存当前 Worker 地址和密码。`);
+  }
+  if (!res.ok) {
+    const msg = await readResponseText(res);
+    throw new Error(`同步分类失败：${res.status} ${msg}`);
+  }
   return true;
 }
 

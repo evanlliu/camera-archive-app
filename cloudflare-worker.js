@@ -15,6 +15,7 @@ export default {
       if (authError) return corsResponse(env, { error: authError }, 401, request);
 
       if (url.pathname === '/health' && request.method === 'GET') return handleHealth(request, env);
+      if (url.pathname === '/write-check' && request.method === 'POST') return handleWriteCheck(request, env);
       if (url.pathname === '/upload' && request.method === 'POST') return handleUpload(request, env);
       if (url.pathname === '/photo' && request.method === 'DELETE') return handleDeletePhoto(request, env);
       if (url.pathname === '/folders' && request.method === 'PUT') return handlePutFolders(request, env);
@@ -62,8 +63,29 @@ async function handleHealth(request, env) {
     private: Boolean(repoJson.private),
     branch,
     maxUploadMb: Number(env.MAX_UPLOAD_MB || 50),
-    workerVersion: '1.1-health'
+    workerVersion: '1.2-write-check'
   }, 200, request);
+}
+
+async function handleWriteCheck(request, env) {
+  const owner = required(env.GITHUB_OWNER, 'GITHUB_OWNER');
+  const repo = required(env.GITHUB_REPO, 'GITHUB_REPO');
+  const branch = env.GITHUB_BRANCH || 'main';
+  const body = await request.json().catch(() => ({}));
+  const now = new Date().toISOString();
+  const payload = {
+    ok: true,
+    app: 'scene-camera-pwa',
+    check: 'github-write',
+    repo: `${owner}/${repo}`,
+    branch,
+    checkedAt: body.checkedAt || now,
+    workerTime: now,
+    workerVersion: '1.2-write-check'
+  };
+  const remotePath = '.system/healthcheck.json';
+  await putOrUpdateFile(env, remotePath, JSON.stringify(payload, null, 2), 'Worker write check');
+  return corsResponse(env, { ok: true, repo: `${owner}/${repo}`, branch, remotePath, checkedAt: now }, 200, request);
 }
 
 async function handleUpload(request, env) {
