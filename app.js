@@ -21,12 +21,14 @@ const els = {
   statPending: $('statPending'),
   statFailed: $('statFailed'),
   statTrash: $('statTrash'),
+  currentFolderTitle: $('currentFolderTitle'),
+  currentFolderMeta: $('currentFolderMeta'),
+  folderCount: $('folderCount'),
+  photoCount: $('photoCount'),
   settingsDialog: $('settingsDialog'),
   apiBaseInput: $('apiBaseInput'),
   appPasswordInput: $('appPasswordInput'),
   saveSettingsBtn: $('saveSettingsBtn'),
-  testConnectionBtn: $('testConnectionBtn'),
-  testConnectionResult: $('testConnectionResult'),
   photoDialog: $('photoDialog'),
   photoPreview: $('photoPreview'),
   photoNote: $('photoNote'),
@@ -254,11 +256,19 @@ async function render() {
   const pending = allPhotos.filter(p => ['pending', 'deletePending'].includes(p.syncStatus));
   const failed = allPhotos.filter(p => p.syncStatus === 'failed');
   const trash = allPhotos.filter(p => !!p.deletedAt);
+  const children = await getChildren(currentFolderId);
+  const currentPhotos = activePhotos.filter(p => p.folderId === currentFolderId);
+  const path = await getFolderPath(currentFolderId);
+  const currentFolderName = currentFolderId === ROOT_ID ? '全部分类' : (path[path.length - 1]?.name || '当前分类');
 
   els.statPhotos.textContent = activePhotos.length;
   els.statPending.textContent = pending.length;
   els.statFailed.textContent = failed.length;
   els.statTrash.textContent = trash.length;
+  if (els.currentFolderTitle) els.currentFolderTitle.textContent = currentFolderName;
+  if (els.currentFolderMeta) els.currentFolderMeta.textContent = `${children.length} 个子分类 · ${currentPhotos.length} 张照片`;
+  if (els.folderCount) els.folderCount.textContent = `${children.length} 个`;
+  if (els.photoCount) els.photoCount.textContent = `${currentPhotos.length} 张`;
 
   const unsyncedActive = activePhotos.filter(p => p.syncStatus !== 'synced');
   if (unsyncedActive.length > 0 || failed.length > 0) {
@@ -268,13 +278,13 @@ async function render() {
     els.noticeBox.hidden = true;
   }
 
-  await renderBreadcrumbs();
-  await renderFolders(folders);
-  await renderPhotos();
+  await renderBreadcrumbs(path);
+  await renderFolders(children, allPhotos);
+  await renderPhotos(currentPhotos);
 }
 
-async function renderBreadcrumbs() {
-  const path = await getFolderPath(currentFolderId);
+async function renderBreadcrumbs(path = null) {
+  path = path || await getFolderPath(currentFolderId);
   els.breadcrumbs.innerHTML = '';
   const rootBtn = document.createElement('button');
   rootBtn.textContent = '全部分类';
@@ -288,23 +298,40 @@ async function renderBreadcrumbs() {
   }
 }
 
-async function renderFolders() {
-  const children = await getChildren(currentFolderId);
+async function renderFolders(children = null, allPhotos = null) {
+  children = children || await getChildren(currentFolderId);
+  allPhotos = allPhotos || await dbAll('photos');
   els.folderList.innerHTML = '';
   if (children.length === 0) {
     const empty = document.createElement('div');
     empty.className = 'empty';
-    empty.textContent = '还没有子分类。';
+    empty.textContent = '还没有子分类。可以先新建分类，或直接在当前分类拍照。';
     els.folderList.append(empty);
     return;
   }
-  const allPhotos = await dbAll('photos');
   for (const folder of children) {
     const item = document.createElement('div');
     item.className = 'folder-item';
+
+    const main = document.createElement('div');
+    main.className = 'folder-main';
+    const icon = document.createElement('div');
+    icon.className = 'folder-icon';
+    icon.textContent = '📁';
+    const copy = document.createElement('div');
+    copy.style.minWidth = '0';
+    const name = document.createElement('div');
+    name.className = 'name';
+    name.textContent = folder.name;
+    const sub = document.createElement('div');
+    sub.className = 'sub';
     const count = allPhotos.filter(p => p.folderId === folder.id && !p.deletedAt).length;
-    item.innerHTML = `<div><div class="name">📁 ${folder.name}</div><div class="sub">${count} 张照片</div></div>`;
+    sub.textContent = `${count} 张照片`;
+    copy.append(name, sub);
+    main.append(icon, copy);
+
     const actions = document.createElement('div');
+    actions.className = 'folder-actions';
     const openBtn = document.createElement('button');
     openBtn.textContent = '进入';
     openBtn.onclick = () => { currentFolderId = folder.id; render(); };
@@ -313,20 +340,20 @@ async function renderFolders() {
     delBtn.className = 'danger';
     delBtn.onclick = async () => deleteFolder(folder.id);
     actions.append(openBtn, delBtn);
-    item.append(actions);
+    item.append(main, actions);
     els.folderList.append(item);
   }
 }
 
-async function renderPhotos() {
-  const photos = await getActivePhotosInFolder(currentFolderId);
+async function renderPhotos(photos = null) {
+  photos = photos || await getActivePhotosInFolder(currentFolderId);
   for (const url of lastObjectUrls) URL.revokeObjectURL(url);
   lastObjectUrls = [];
   els.photoGrid.innerHTML = '';
   if (photos.length === 0) {
     const empty = document.createElement('div');
     empty.className = 'empty';
-    empty.textContent = '这个分类还没有照片。';
+    empty.textContent = '这个分类还没有照片。点击上方“拍照”，照片会先保存到本机，再进入同步队列。';
     els.photoGrid.append(empty);
     return;
   }
@@ -339,7 +366,13 @@ async function renderPhotos() {
     lastObjectUrls.push(url);
     const badgeClass = photo.syncStatus === 'synced' ? 'synced' : photo.syncStatus === 'failed' ? 'failed' : 'pending';
     const badgeText = photo.syncStatus === 'synced' ? '已同步' : photo.syncStatus === 'failed' ? '失败' : '待同步';
-    btn.innerHTML = `<img alt="照片" src="${url}"><span class="badge ${badgeClass}">${badgeText}</span>`;
+    const img = document.createElement('img');
+    img.alt = '照片';
+    img.src = url;
+    const badge = document.createElement('span');
+    badge.className = `badge ${badgeClass}`;
+    badge.textContent = badgeText;
+    btn.append(img, badge);
     btn.onclick = () => openPhoto(photo.id);
     els.photoGrid.append(btn);
   }
@@ -430,7 +463,7 @@ async function openPhoto(photoId) {
   selectedPhotoId = photoId;
   els.photoPreview.src = URL.createObjectURL(photo.blob);
   els.photoNote.value = photo.note || '';
-  els.photoMeta.textContent = `状态：${photo.syncStatus} · 大小：${formatBytes(photo.size)} · 创建：${formatTs(photo.createdAt)}${photo.remoteSyncedAt ? ` · 已同步：${formatTs(photo.remoteSyncedAt)}` : ''}`;
+  els.photoMeta.textContent = `状态：${photo.syncStatus} · 大小：${formatBytes(photo.size)} · 创建：${formatTs(photo.createdAt)}${photo.remoteSyncedAt ? ` · 已同步：${formatTs(photo.remoteSyncedAt)}` : ''}${photo.lastError ? ` · 错误：${photo.lastError}` : ''}`;
   els.photoDialog.showModal();
 }
 
@@ -482,109 +515,6 @@ async function saveSettings() {
   await render();
 }
 
-function setTestResult(message, type = 'info') {
-  if (!els.testConnectionResult) return;
-  els.testConnectionResult.hidden = false;
-  els.testConnectionResult.className = `test-result ${type}`;
-  els.testConnectionResult.textContent = message;
-}
-
-async function readResponseText(res) {
-  const text = await res.text();
-  try {
-    const json = JSON.parse(text);
-    return json.error || json.message || text;
-  } catch (_) {
-    return text;
-  }
-}
-
-async function testConnection() {
-  const apiBase = els.apiBaseInput.value.trim().replace(/\/+$/, '');
-  const appPassword = els.appPasswordInput.value;
-
-  if (!apiBase) {
-    setTestResult('请先填写 Cloudflare Worker 地址。', 'error');
-    return;
-  }
-  if (!/^https:\/\//i.test(apiBase)) {
-    setTestResult('Worker 地址必须以 https:// 开头。', 'error');
-    return;
-  }
-  if (!appPassword) {
-    setTestResult('请先填写 App 密码。', 'error');
-    return;
-  }
-
-  els.testConnectionBtn.disabled = true;
-  setTestResult('正在测试 Worker 地址、App 密码和 GitHub 仓库访问…', 'info');
-
-  try {
-    const rootRes = await fetch(`${apiBase}/`, { method: 'GET', cache: 'no-store' });
-    if (!rootRes.ok) {
-      const msg = await readResponseText(rootRes);
-      throw new Error(`Worker 首页返回 ${rootRes.status}：${msg}`);
-    }
-
-    const healthRes = await fetch(`${apiBase}/health`, {
-      method: 'GET',
-      cache: 'no-store',
-      headers: { 'x-app-password': appPassword }
-    });
-
-    if (healthRes.status === 404) {
-      // 兼容旧 Worker：如果还没更新 /health，就用 /folders 测试密码和 GitHub 读权限。
-      const foldersRes = await fetch(`${apiBase}/folders`, {
-        method: 'GET',
-        cache: 'no-store',
-        headers: { 'x-app-password': appPassword }
-      });
-      if (!foldersRes.ok) {
-        const msg = await readResponseText(foldersRes);
-        throw new Error(`Worker 可访问，但密码或 GitHub 读取失败：${foldersRes.status} ${msg}`);
-      }
-      setTestResult('连接成功：Worker 可访问，App 密码有效，GitHub 读取正常。建议同步前仍更新新版 Worker 代码以启用完整健康检查。', 'ok');
-      return;
-    }
-
-    if (!healthRes.ok) {
-      const msg = await readResponseText(healthRes);
-      throw new Error(`Worker 可访问，但认证或 GitHub 检查失败：${healthRes.status} ${msg}`);
-    }
-
-    const health = await healthRes.json();
-    const repo = health.repo || 'GitHub 仓库';
-
-    const writeRes = await fetch(`${apiBase}/write-check`, {
-      method: 'POST',
-      cache: 'no-store',
-      headers: { 'content-type': 'application/json', 'x-app-password': appPassword },
-      body: JSON.stringify({ checkedAt: new Date().toISOString() })
-    });
-    if (writeRes.status === 404) {
-      throw new Error('Worker 还不是新版：缺少 /write-check。请把压缩包里的 cloudflare-worker.js 复制到 Cloudflare 后重新 Deploy。');
-    }
-    if (!writeRes.ok) {
-      const msg = await readResponseText(writeRes);
-      throw new Error(`GitHub 写入测试失败：${writeRes.status} ${msg}`);
-    }
-
-    await setSetting('apiBase', apiBase);
-    await setSetting('appPassword', appPassword);
-    await updateStorageLine();
-    setTestResult(`连接成功：Worker 正常，App 密码有效，GitHub 仓库 ${repo} 读写正常。已自动保存当前设置，可以直接同步。`, 'ok');
-  } catch (err) {
-    const msg = err?.message || String(err);
-    if (msg.includes('Load failed') || msg.includes('Failed to fetch')) {
-      setTestResult('连接失败：浏览器无法访问 Worker。请检查 Worker 地址、Cloudflare 是否已部署、CORS_ORIGIN 是否为 https://evanlliu.github.io，并确认前端页面不是旧缓存。', 'error');
-    } else {
-      setTestResult(`连接失败：${msg}`, 'error');
-    }
-  } finally {
-    els.testConnectionBtn.disabled = false;
-  }
-}
-
 async function syncFoldersSafe() {
   try { await syncFolders(); } catch (err) { console.warn('sync folders failed', err); }
 }
@@ -593,20 +523,12 @@ async function syncFolders() {
   const { apiBase, appPassword } = await getSyncConfig();
   if (!apiBase || !appPassword) return false;
   const folders = await dbAll('folders');
-  let res;
-  try {
-    res = await fetch(`${apiBase}/folders`, {
-      method: 'PUT',
-      headers: { 'content-type': 'application/json', 'x-app-password': appPassword },
-      body: JSON.stringify({ folders, updatedAt: new Date().toISOString() })
-    });
-  } catch (err) {
-    throw new Error(`无法连接 Worker 写入分类：${err.message || err}。请重新打开设置，点“测试连接”；测试成功后会自动保存当前 Worker 地址和密码。`);
-  }
-  if (!res.ok) {
-    const msg = await readResponseText(res);
-    throw new Error(`同步分类失败：${res.status} ${msg}`);
-  }
+  const res = await fetch(`${apiBase}/folders`, {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json', 'x-app-password': appPassword },
+    body: JSON.stringify({ folders, updatedAt: new Date().toISOString() })
+  });
+  if (!res.ok) throw new Error(await res.text());
   return true;
 }
 
@@ -663,7 +585,7 @@ async function buildPhotoMetadata(photo) {
     updatedAt: photo.updatedAt,
     remotePath,
     remoteMetaPath,
-    app: 'scene-camera-pwa',
+    app: 'camera-archive-app',
     version: 1
   };
 }
@@ -736,7 +658,7 @@ async function exportZip() {
     const zip = new JSZip();
     const folders = await dbAll('folders');
     const photos = (await dbAll('photos')).filter(p => !p.deletedAt);
-    const manifest = { exportedAt: new Date().toISOString(), app: 'scene-camera-pwa', version: 1, folders, photos: [] };
+    const manifest = { exportedAt: new Date().toISOString(), app: 'camera-archive-app', version: 1, folders, photos: [] };
 
     zip.file('folders.json', JSON.stringify(folders, null, 2));
     for (const photo of photos) {
@@ -856,7 +778,6 @@ async function init() {
   els.importInput.onchange = () => importZip(els.importInput.files?.[0]);
   els.settingsBtn.onclick = showSettings;
   els.saveSettingsBtn.onclick = saveSettings;
-  els.testConnectionBtn.onclick = testConnection;
   els.saveNoteBtn.onclick = saveSelectedNote;
   els.deletePhotoBtn.onclick = softDeleteSelectedPhoto;
 
