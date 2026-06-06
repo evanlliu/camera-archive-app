@@ -21,7 +21,7 @@
         <p id="storageLine">正在检查存储状态…</p>
       </div>
     </div>
-    <button id="settingsBtn" class="icon-button" aria-label="设置">设置</button>
+    <button id="settingsBtn" type="button" class="icon-button" aria-label="设置">设置</button>
   </header>
 
   <main class="app-shell">
@@ -31,7 +31,7 @@
         <h2 id="currentFolderTitle">全部分类</h2>
         <p id="currentFolderMeta" class="muted-line">0 个子分类 · 0 张照片</p>
       </div>
-      <button id="captureBtn" class="primary capture-main">拍照</button>
+      <button id="captureBtn" type="button" class="primary capture-main">拍照</button>
     </section>
 
     <section class="status-grid" aria-label="数据状态">
@@ -42,9 +42,9 @@
     </section>
 
     <section class="action-panel" aria-label="常用操作">
-      <button id="newFolderBtn">新分类</button>
-      <button id="syncBtn">同步</button>
-      <button id="exportBtn">导出</button>
+      <button id="newFolderBtn" type="button">新分类</button>
+      <button id="syncBtn" type="button">同步</button>
+      <button id="exportBtn" type="button">导出</button>
       <label class="buttonLike">
         导入
         <input id="importInput" type="file" accept=".zip,application/zip" hidden />
@@ -111,7 +111,7 @@
       <p class="hint">密码只保存在这台设备的浏览器本地。真正的 GitHub Token 只放在 Cloudflare Worker Secret 里。保存后，每次打开会默认先加载 GitHub 云端数据。</p>
       <menu>
         <button value="cancel">取消</button>
-        <button id="saveSettingsBtn" value="default" class="primary">保存</button>
+        <button id="saveSettingsBtn" type="button" class="primary">保存</button>
       </menu>
     </form>
   </dialog>
@@ -122,8 +122,8 @@
       <textarea id="photoNote" placeholder="备注，可选"></textarea>
       <p id="photoMeta" class="hint"></p>
       <menu>
-        <button id="saveNoteBtn" value="default">保存备注</button>
-        <button id="deletePhotoBtn" value="default" class="danger">删除</button>
+        <button id="saveNoteBtn" type="button">保存备注</button>
+        <button id="deletePhotoBtn" type="button" class="danger">删除</button>
         <button value="cancel">关闭</button>
       </menu>
     </form>
