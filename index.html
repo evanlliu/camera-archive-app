@@ -118,7 +118,16 @@
 
   <dialog id="photoDialog" class="photo-dialog">
     <form method="dialog" class="dialog-card photo-dialog-card">
-      <img id="photoPreview" alt="照片预览" />
+      <div class="photo-stage">
+        <button id="prevPhotoBtn" type="button" class="photo-nav photo-nav-prev" aria-label="上一张">‹</button>
+        <img id="photoPreview" alt="照片预览" />
+        <button id="nextPhotoBtn" type="button" class="photo-nav photo-nav-next" aria-label="下一张">›</button>
+      </div>
+      <div class="photo-switch-row">
+        <button id="prevPhotoTextBtn" type="button">上一张</button>
+        <span id="photoCounter" class="pill">1 / 1</span>
+        <button id="nextPhotoTextBtn" type="button">下一张</button>
+      </div>
       <textarea id="photoNote" placeholder="备注，可选"></textarea>
       <p id="photoMeta" class="hint"></p>
       <menu>

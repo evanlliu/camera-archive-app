@@ -35,6 +35,11 @@ const els = {
   photoPreview: $('photoPreview'),
   photoNote: $('photoNote'),
   photoMeta: $('photoMeta'),
+  photoCounter: $('photoCounter'),
+  prevPhotoBtn: $('prevPhotoBtn'),
+  nextPhotoBtn: $('nextPhotoBtn'),
+  prevPhotoTextBtn: $('prevPhotoTextBtn'),
+  nextPhotoTextBtn: $('nextPhotoTextBtn'),
   saveNoteBtn: $('saveNoteBtn'),
   deletePhotoBtn: $('deletePhotoBtn')
 };
@@ -42,8 +47,11 @@ const els = {
 let db;
 let currentFolderId = ROOT_ID;
 let selectedPhotoId = null;
+let selectedPhotoIndex = -1;
+let photoViewerIds = [];
 let syncRunning = false;
 let lastObjectUrls = [];
+let currentPreviewUrl = '';
 
 function fetchWithTimeout(url, options = {}, timeoutMs = 30000) {
   const controller = new AbortController();
@@ -364,13 +372,19 @@ async function renderFolders(children = null, allPhotos = null) {
     const actions = document.createElement('div');
     actions.className = 'folder-actions';
     const openBtn = document.createElement('button');
+    openBtn.type = 'button';
     openBtn.textContent = '进入';
     openBtn.onclick = () => { currentFolderId = folder.id; render(); };
+    const renameBtn = document.createElement('button');
+    renameBtn.type = 'button';
+    renameBtn.textContent = '改名';
+    renameBtn.onclick = async () => renameFolder(folder.id);
     const delBtn = document.createElement('button');
+    delBtn.type = 'button';
     delBtn.textContent = '删除';
     delBtn.className = 'danger';
     delBtn.onclick = async () => deleteFolder(folder.id);
-    actions.append(openBtn, delBtn);
+    actions.append(openBtn, renameBtn, delBtn);
     item.append(main, actions);
     els.folderList.append(item);
   }
@@ -378,6 +392,7 @@ async function renderFolders(children = null, allPhotos = null) {
 
 async function renderPhotos(photos = null) {
   photos = photos || await getActivePhotosInFolder(currentFolderId);
+  photoViewerIds = photos.map(p => p.id);
   for (const url of lastObjectUrls) URL.revokeObjectURL(url);
   lastObjectUrls = [];
   els.photoGrid.innerHTML = '';
@@ -408,7 +423,7 @@ async function renderPhotos(photos = null) {
     badge.className = `badge ${badgeClass}`;
     badge.textContent = badgeText;
     btn.append(img, badge);
-    btn.onclick = () => openPhoto(photo.id);
+    btn.onclick = () => openPhoto(photo.id, photoViewerIds);
     els.photoGrid.append(btn);
   }
 }
@@ -418,6 +433,21 @@ async function createFolder() {
   if (!name?.trim()) return;
   const now = new Date().toISOString();
   await dbPut('folders', { id: uid('folder'), name: name.trim(), parentId: currentFolderId, createdAt: now, updatedAt: now });
+  await render();
+  await syncFoldersSafe();
+}
+
+async function renameFolder(folderId) {
+  if (folderId === ROOT_ID) return;
+  const folder = await dbGet('folders', folderId);
+  if (!folder) return;
+  const name = prompt('新的分类名称', folder.name || '');
+  if (!name?.trim()) return;
+  const nextName = name.trim();
+  if (nextName === folder.name) return;
+  folder.name = nextName;
+  folder.updatedAt = new Date().toISOString();
+  await dbPut('folders', folder);
   await render();
   await syncFoldersSafe();
 }
@@ -492,14 +522,40 @@ function setBusy(isBusy, label = '') {
   }
 }
 
-async function openPhoto(photoId) {
-  const photo = await dbGet('photos', photoId);
-  if (!photo) return;
+async function openPhoto(photoId, ids = null) {
+  if (Array.isArray(ids) && ids.length) photoViewerIds = ids.slice();
+  if (!photoViewerIds.includes(photoId)) {
+    const photos = await getActivePhotosInFolder(currentFolderId);
+    photoViewerIds = photos.map(p => p.id);
+  }
+  selectedPhotoIndex = Math.max(0, photoViewerIds.indexOf(photoId));
   selectedPhotoId = photoId;
-  els.photoPreview.src = URL.createObjectURL(photo.blob);
+  await renderPhotoDialogContent();
+  if (!els.photoDialog.open) els.photoDialog.showModal();
+}
+
+async function renderPhotoDialogContent() {
+  if (!selectedPhotoId) return;
+  const photo = await dbGet('photos', selectedPhotoId);
+  if (!photo) return;
+  if (currentPreviewUrl) URL.revokeObjectURL(currentPreviewUrl);
+  currentPreviewUrl = URL.createObjectURL(photo.blob);
+  els.photoPreview.src = currentPreviewUrl;
   els.photoNote.value = photo.note || '';
+  const total = photoViewerIds.length || 1;
+  const humanIndex = selectedPhotoIndex >= 0 ? selectedPhotoIndex + 1 : 1;
+  if (els.photoCounter) els.photoCounter.textContent = `${humanIndex} / ${total}`;
+  for (const btn of [els.prevPhotoBtn, els.prevPhotoTextBtn]) if (btn) btn.disabled = total <= 1;
+  for (const btn of [els.nextPhotoBtn, els.nextPhotoTextBtn]) if (btn) btn.disabled = total <= 1;
   els.photoMeta.textContent = `状态：${photo.syncStatus} · 大小：${formatBytes(photo.size)} · 创建：${formatTs(photo.createdAt)}${photo.remoteSyncedAt ? ` · 已同步：${formatTs(photo.remoteSyncedAt)}` : ''}${photo.lastError ? ` · 错误：${photo.lastError}` : ''}`;
-  els.photoDialog.showModal();
+}
+
+async function switchPhoto(delta) {
+  if (!photoViewerIds.length) return;
+  const currentIndex = Math.max(0, photoViewerIds.indexOf(selectedPhotoId));
+  selectedPhotoIndex = (currentIndex + delta + photoViewerIds.length) % photoViewerIds.length;
+  selectedPhotoId = photoViewerIds[selectedPhotoIndex];
+  await renderPhotoDialogContent();
 }
 
 async function saveSelectedNote() {
@@ -870,8 +926,8 @@ async function buildPhotoMetadata(photo) {
   const mm = String(created.getMonth() + 1).padStart(2, '0');
   const safePath = folderPath.map(safeSegment).join('/');
   const remoteDir = safePath ? `photos/${yyyy}/${mm}/${safePath}` : `photos/${yyyy}/${mm}/未分类`;
-  const remotePath = `${remoteDir}/${safeSegment(photo.filename)}`;
-  const remoteMetaPath = `${remotePath}.json`;
+  const remotePath = photo.remotePath || `${remoteDir}/${safeSegment(photo.filename)}`;
+  const remoteMetaPath = photo.remoteMetaPath || `${remotePath}.json`;
   return {
     id: photo.id,
     folderId: photo.folderId,
@@ -1079,8 +1135,18 @@ async function init() {
   els.settingsBtn.onclick = showSettings;
   els.saveSettingsBtn.onclick = saveSettings;
   if (els.testConnectionBtn) els.testConnectionBtn.onclick = testConnection;
+  if (els.prevPhotoBtn) els.prevPhotoBtn.onclick = () => switchPhoto(-1);
+  if (els.nextPhotoBtn) els.nextPhotoBtn.onclick = () => switchPhoto(1);
+  if (els.prevPhotoTextBtn) els.prevPhotoTextBtn.onclick = () => switchPhoto(-1);
+  if (els.nextPhotoTextBtn) els.nextPhotoTextBtn.onclick = () => switchPhoto(1);
   els.saveNoteBtn.onclick = saveSelectedNote;
   els.deletePhotoBtn.onclick = softDeleteSelectedPhoto;
+
+  els.photoDialog.addEventListener('close', () => {
+    if (currentPreviewUrl) { URL.revokeObjectURL(currentPreviewUrl); currentPreviewUrl = ''; }
+    selectedPhotoId = null;
+    selectedPhotoIndex = -1;
+  });
 
   window.addEventListener('online', () => syncNow(false));
 

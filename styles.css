@@ -393,3 +393,75 @@ dialog::backdrop { background: rgba(0,0,0,.68); backdrop-filter: blur(4px); }
   .folder-list { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); overflow: visible; }
   .folder-item { flex: none; }
 }
+
+/* v4: folder rename + photo viewer navigation */
+.folder-actions {
+  display: grid;
+  grid-template-columns: repeat(3, auto);
+  gap: 5px;
+}
+.folder-actions button { white-space: nowrap; }
+.photo-stage {
+  position: relative;
+  display: grid;
+  place-items: center;
+  background: #000;
+  border-radius: 16px;
+  overflow: hidden;
+  border: 1px solid rgba(255,255,255,.08);
+}
+.photo-dialog-card .photo-stage img {
+  width: 100%;
+  max-height: 58vh;
+  object-fit: contain;
+  border: 0;
+  border-radius: 0;
+  background: #000;
+}
+.photo-nav {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 2;
+  width: 42px;
+  height: 64px;
+  min-height: 0;
+  padding: 0;
+  border-radius: 999px;
+  font-size: 36px;
+  line-height: 1;
+  background: rgba(15, 23, 42, .56);
+  border-color: rgba(255,255,255,.16);
+  color: white;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+.photo-nav:disabled,
+.photo-switch-row button:disabled {
+  opacity: .35;
+}
+.photo-nav-prev { left: 8px; }
+.photo-nav-next { right: 8px; }
+.photo-switch-row {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  gap: 8px;
+}
+.photo-switch-row button {
+  min-height: 38px;
+  border-radius: 12px;
+}
+.photo-switch-row .pill {
+  justify-self: center;
+}
+@media (max-width: 420px) {
+  .photo-nav {
+    width: 36px;
+    height: 54px;
+    font-size: 30px;
+  }
+  .folder-item {
+    flex-basis: min(84vw, 286px);
+  }
+}
