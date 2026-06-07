@@ -622,3 +622,214 @@ dialog::backdrop { background: rgba(0,0,0,.68); backdrop-filter: blur(4px); }
 
 .app-version { font-size: 0.42em; color: var(--muted); font-weight: 700; vertical-align: middle; }
 .photo-card img.broken { object-fit: contain; opacity: .65; background: rgba(255,255,255,.05); }
+
+/* v9: stable full-screen photo viewer */
+.viewer-dialog,
+.photo-dialog.viewer-dialog {
+  width: 100vw;
+  max-width: none;
+  height: 100dvh;
+  max-height: none;
+  margin: 0;
+  border-radius: 0;
+}
+.viewer-dialog::backdrop {
+  background: rgba(0, 0, 0, .88);
+  backdrop-filter: blur(7px);
+  -webkit-backdrop-filter: blur(7px);
+}
+.photo-dialog-card.viewer-card {
+  width: 100vw;
+  height: 100dvh;
+  max-height: none;
+  border-radius: 0;
+  border: 0;
+  padding: max(10px, env(safe-area-inset-top)) 10px max(10px, env(safe-area-inset-bottom));
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto auto auto;
+  gap: 8px;
+  background: linear-gradient(180deg, #071122, #050915);
+  overflow: hidden;
+}
+.viewer-topbar {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr) 72px;
+  align-items: center;
+  gap: 8px;
+  min-height: 42px;
+}
+.viewer-icon-btn,
+.viewer-delete {
+  min-height: 38px;
+  border-radius: 14px;
+  padding: 0 10px;
+}
+.viewer-icon-btn {
+  font-size: 24px;
+  line-height: 1;
+  background: rgba(23,32,51,.70);
+}
+.viewer-delete {
+  background: rgba(239,68,68,.15);
+  border-color: rgba(239,68,68,.38);
+  color: #fecaca;
+}
+.viewer-counter {
+  justify-self: center;
+  color: var(--text);
+  font-weight: 850;
+  background: rgba(255,255,255,.08);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 7px 12px;
+  min-width: 68px;
+  text-align: center;
+}
+.photo-dialog-card.viewer-card .photo-stage {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  max-height: none;
+  min-height: 0;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  border-radius: 18px;
+  border: 1px solid rgba(148,163,184,.22);
+  background:
+    radial-gradient(circle at center, rgba(30,41,59,.75), #000 70%);
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.photo-dialog-card.viewer-card .photo-stage img {
+  width: 100%;
+  height: 100%;
+  max-height: none;
+  object-fit: contain;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  transform-origin: center center;
+  will-change: transform;
+  transition: transform .06s ease-out;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-user-drag: none;
+}
+.photo-dialog-card.viewer-card .photo-stage.is-loading::after {
+  content: '正在加载图片…';
+  position: absolute;
+  inset: auto 14px 14px;
+  text-align: center;
+  color: #dbeafe;
+  background: rgba(15,23,42,.72);
+  border: 1px solid rgba(148,163,184,.22);
+  border-radius: 999px;
+  padding: 8px 12px;
+  font-size: 13px;
+}
+.photo-dialog-card.viewer-card .photo-nav {
+  position: absolute;
+  left: 50%;
+  z-index: 3;
+  width: 52px;
+  height: 40px;
+  min-height: 0;
+  padding: 0;
+  transform: translateX(-50%);
+  border-radius: 999px;
+  font-size: 30px;
+  line-height: 1;
+  background: rgba(15, 23, 42, .58);
+  border-color: rgba(255,255,255,.16);
+  color: white;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+.photo-nav-up { top: 8px; }
+.photo-nav-down { bottom: 8px; }
+.viewer-control-row {
+  display: grid;
+  grid-template-columns: 1.25fr .75fr 1fr .75fr 1.25fr;
+  gap: 6px;
+}
+.viewer-control-row button {
+  min-height: 36px;
+  padding: 6px 5px;
+  border-radius: 12px;
+  font-size: 13px;
+}
+.viewer-note-panel {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 92px;
+  gap: 8px;
+  align-items: stretch;
+}
+.photo-dialog-card.viewer-card textarea {
+  min-height: 48px;
+  max-height: 64px;
+  resize: none;
+  padding: 10px 11px;
+  border-radius: 14px;
+  line-height: 1.35;
+  font-size: 14px;
+}
+.viewer-note-panel button {
+  min-height: 48px;
+  border-radius: 14px;
+  padding: 8px 6px;
+  font-size: 13px;
+}
+.viewer-meta {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 11px;
+  min-height: 16px;
+}
+.photo-card {
+  contain: layout paint;
+}
+@media (max-height: 720px) {
+  .photo-dialog-card.viewer-card {
+    gap: 6px;
+  }
+  .viewer-topbar {
+    min-height: 36px;
+    grid-template-columns: 40px minmax(0, 1fr) 64px;
+  }
+  .viewer-icon-btn,
+  .viewer-delete {
+    min-height: 34px;
+    border-radius: 12px;
+    font-size: 13px;
+  }
+  .viewer-icon-btn { font-size: 22px; }
+  .viewer-counter {
+    padding: 5px 10px;
+    font-size: 13px;
+  }
+  .viewer-control-row button {
+    min-height: 31px;
+    font-size: 12px;
+  }
+  .photo-dialog-card.viewer-card textarea {
+    min-height: 40px;
+    max-height: 46px;
+    font-size: 13px;
+  }
+  .viewer-note-panel button {
+    min-height: 40px;
+    font-size: 12px;
+  }
+  .viewer-meta {
+    display: none;
+  }
+}
+@media (min-width: 700px) {
+  .photo-dialog-card.viewer-card {
+    width: min(100vw, 900px);
+    margin: 0 auto;
+  }
+}

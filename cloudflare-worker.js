@@ -18,6 +18,7 @@ export default {
       if (url.pathname === '/cloud-state' && request.method === 'GET') return handleCloudState(request, env);
       if (url.pathname === '/file' && request.method === 'GET') return handleGetFile(request, env);
       if (url.pathname === '/upload' && request.method === 'POST') return handleUpload(request, env);
+      if (url.pathname === '/metadata' && request.method === 'POST') return handleMetadataOnly(request, env);
       if (url.pathname === '/photo' && request.method === 'DELETE') return handleDeletePhoto(request, env);
       if (url.pathname === '/cleanup-moved-photo' && request.method === 'POST') return handleCleanupMovedPhoto(request, env);
       if (url.pathname === '/folders' && (request.method === 'PUT' || request.method === 'POST')) return handlePutFolders(request, env);
@@ -168,6 +169,26 @@ async function handleUpload(request, env) {
 
   return corsResponse(env, { ok: true, remotePath, remoteMetaPath, remoteThumbPath, uploadedAt: now }, 200, request);
 }
+async function handleMetadataOnly(request, env) {
+  const body = await request.json();
+  const metadata = body.metadata || body;
+  validateMetadata(metadata);
+  const remotePath = normalizeRepoPath(metadata.remotePath);
+  const remoteMetaPath = normalizeRepoPath(metadata.remoteMetaPath || `${remotePath}.json`);
+  const now = new Date().toISOString();
+  const finalMetadata = {
+    ...metadata,
+    remotePath,
+    remoteMetaPath,
+    remoteThumbPath: normalizeRepoPath(metadata.remoteThumbPath || `${remotePath}.thumb.jpg`),
+    uploadedAt: metadata.uploadedAt || now,
+    metadataUpdatedAt: now,
+    workerVersion: 4
+  };
+  await putOrUpdateFile(env, remoteMetaPath, JSON.stringify(finalMetadata, null, 2), `Update metadata ${metadata.id}`);
+  return corsResponse(env, { ok: true, remotePath, remoteMetaPath, metadataUpdatedAt: now }, 200, request);
+}
+
 
 async function handleDeletePhoto(request, env) {
   const body = await request.json();

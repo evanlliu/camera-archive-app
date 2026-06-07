@@ -17,7 +17,7 @@
     <div class="brand">
       <div class="brand-icon" aria-hidden="true">📷</div>
       <div class="brand-copy">
-        <h1>场景相机 <small class="app-version">v8</small></h1>
+        <h1>场景相机 <small class="app-version">v9</small></h1>
         <p id="storageLine">正在检查存储状态…</p>
       </div>
     </div>
@@ -116,31 +116,33 @@
     </form>
   </dialog>
 
-  <dialog id="photoDialog" class="photo-dialog">
-    <form method="dialog" class="dialog-card photo-dialog-card">
-      <div class="photo-stage">
-        <button id="prevPhotoBtn" type="button" class="photo-nav photo-nav-prev" aria-label="上一张">‹</button>
-        <img id="photoPreview" alt="照片预览" />
-        <button id="nextPhotoBtn" type="button" class="photo-nav photo-nav-next" aria-label="下一张">›</button>
+  <dialog id="photoDialog" class="photo-dialog viewer-dialog">
+    <form method="dialog" class="dialog-card photo-dialog-card viewer-card">
+      <div class="viewer-topbar">
+        <button type="submit" value="cancel" class="viewer-icon-btn" aria-label="关闭">×</button>
+        <span id="photoCounter" class="viewer-counter">1 / 1</span>
+        <button id="deletePhotoBtn" type="button" class="viewer-delete">删除</button>
       </div>
-      <div class="photo-switch-row">
+
+      <div class="photo-stage" aria-label="照片查看区域。双指缩放，放大后拖动；未放大时上下滑动切换照片。">
+        <button id="prevPhotoBtn" type="button" class="photo-nav photo-nav-up" aria-label="上一张">⌃</button>
+        <img id="photoPreview" alt="照片预览" draggable="false" />
+        <button id="nextPhotoBtn" type="button" class="photo-nav photo-nav-down" aria-label="下一张">⌄</button>
+      </div>
+
+      <div class="viewer-control-row">
         <button id="prevPhotoTextBtn" type="button">上一张</button>
-        <span id="photoCounter" class="pill">1 / 1</span>
-        <button id="nextPhotoTextBtn" type="button">下一张</button>
-      </div>
-      <div class="photo-zoom-row" aria-label="图片缩放控制">
         <button id="zoomOutBtn" type="button" aria-label="缩小">－</button>
         <button id="zoomResetBtn" type="button">100%</button>
         <button id="zoomInBtn" type="button" aria-label="放大">＋</button>
+        <button id="nextPhotoTextBtn" type="button">下一张</button>
       </div>
-      <p class="hint zoom-hint">双指捏合缩放，放大后可拖动；双击图片可快速放大/还原。</p>
-      <textarea id="photoNote" placeholder="备注，可选"></textarea>
-      <p id="photoMeta" class="hint"></p>
-      <menu>
-        <button id="saveNoteBtn" type="button">保存备注</button>
-        <button id="deletePhotoBtn" type="button" class="danger">删除</button>
-        <button value="cancel">关闭</button>
-      </menu>
+
+      <div class="viewer-note-panel">
+        <textarea id="photoNote" placeholder="备注，可选"></textarea>
+        <button id="saveNoteBtn" type="button" class="primary">保存备注</button>
+      </div>
+      <p id="photoMeta" class="hint viewer-meta"></p>
     </form>
   </dialog>
 

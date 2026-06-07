@@ -62,6 +62,10 @@ let photoPointers = new Map();
 let photoPinchStart = null;
 let photoDragStart = null;
 let photoLastTapAt = 0;
+let photoSwipeStart = null;
+let photoSwipeTriggered = false;
+let currentViewerLoadToken = 0;
+let viewerRenderLimit = 180;
 
 function fetchWithTimeout(url, options = {}, timeoutMs = 30000) {
   const controller = new AbortController();
@@ -425,8 +429,8 @@ async function render() {
   const folders = await dbAll('folders');
   const allPhotos = await dbAll('photos');
   const activePhotos = allPhotos.filter(p => !p.deletedAt);
-  const pending = allPhotos.filter(p => ['pending', 'deletePending'].includes(p.syncStatus));
-  const failed = allPhotos.filter(p => p.syncStatus === 'failed');
+  const pending = allPhotos.filter(p => ['pending', 'deletePending', 'metadataPending'].includes(p.syncStatus));
+  const failed = allPhotos.filter(p => ['failed', 'metadataFailed'].includes(p.syncStatus));
   const trash = allPhotos.filter(p => !!p.deletedAt);
   const children = await getChildren(currentFolderId);
   const currentPhotos = activePhotos.filter(p => p.folderId === currentFolderId);
@@ -537,7 +541,8 @@ async function renderPhotos(photos = null) {
     return;
   }
 
-  for (const photo of photos) {
+  const visiblePhotos = photos.slice(0, viewerRenderLimit);
+  for (const photo of visiblePhotos) {
     const btn = document.createElement('button');
     btn.className = 'photo-card';
     const badgeClass = photo.syncStatus === 'synced' ? 'synced' : photo.syncStatus === 'failed' ? 'failed' : 'pending';
@@ -574,32 +579,20 @@ async function renderPhotos(photos = null) {
     badge.className = `badge ${badgeClass}`;
     badge.textContent = badgeText;
     btn.append(img, badge);
-    btn.title = '点按原生全屏查看，长按打开备注/删除';
-    let longPressTimer = null;
-    let longPressOpened = false;
-    const clearLongPress = () => {
-      if (longPressTimer) clearTimeout(longPressTimer);
-      longPressTimer = null;
-    };
-    btn.addEventListener('pointerdown', () => {
-      longPressOpened = false;
-      clearLongPress();
-      longPressTimer = setTimeout(() => {
-        longPressOpened = true;
-        openPhoto(photo.id, photoViewerIds);
-      }, 650);
-    });
-    btn.addEventListener('pointerup', clearLongPress);
-    btn.addEventListener('pointercancel', clearLongPress);
-    btn.addEventListener('pointerleave', clearLongPress);
-    btn.onclick = async () => {
-      if (longPressOpened) {
-        longPressOpened = false;
-        return;
-      }
-      await openNativePhoto(photo);
-    };
+    btn.title = '点按查看，查看页支持缩放、上下切换、备注和删除';
+    btn.onclick = async () => openPhoto(photo.id, photoViewerIds);
     els.photoGrid.append(btn);
+  }
+  if (photos.length > visiblePhotos.length) {
+    const more = document.createElement('button');
+    more.type = 'button';
+    more.className = 'load-more-card';
+    more.textContent = `继续显示 ${Math.min(120, photos.length - visiblePhotos.length)} 张 / 共 ${photos.length} 张`;
+    more.onclick = async () => {
+      viewerRenderLimit += 120;
+      await renderPhotos(photos);
+    };
+    els.photoGrid.append(more);
   }
 }
 
@@ -854,6 +847,8 @@ function installPhotoZoomHandlers() {
         panX: photoPanX,
         panY: photoPanY
       };
+      photoSwipeStart = { x: event.clientX, y: event.clientY, t: Date.now() };
+      photoSwipeTriggered = false;
     } else if (photoPointers.size === 2) {
       const pts = [...photoPointers.values()];
       photoPinchStart = {
@@ -882,6 +877,20 @@ function installPhotoZoomHandlers() {
       return;
     }
 
+    if (photoZoom <= 1.01 && photoSwipeStart && !photoSwipeTriggered && photoPointers.size === 1 && photoViewerIds.length > 1) {
+      const dx = event.clientX - photoSwipeStart.x;
+      const dy = event.clientY - photoSwipeStart.y;
+      if (Math.abs(dy) > 72 && Math.abs(dy) > Math.abs(dx) * 1.18) {
+        event.preventDefault();
+        photoSwipeTriggered = true;
+        photoPointers.clear();
+        photoDragStart = null;
+        photoPinchStart = null;
+        switchPhoto(dy > 0 ? -1 : 1);
+        return;
+      }
+    }
+
     if (photoZoom > 1.01 && photoDragStart && photoPointers.size === 1) {
       event.preventDefault();
       photoPanX = photoDragStart.panX + event.clientX - photoDragStart.x;
@@ -895,7 +904,11 @@ function installPhotoZoomHandlers() {
   const clearPointer = (event) => {
     photoPointers.delete(event.pointerId);
     if (photoPointers.size < 2) photoPinchStart = null;
-    if (photoPointers.size === 0) photoDragStart = null;
+    if (photoPointers.size === 0) {
+      photoDragStart = null;
+      photoSwipeStart = null;
+      photoSwipeTriggered = false;
+    }
   };
   stage.addEventListener('pointerup', clearPointer);
   stage.addEventListener('pointercancel', clearPointer);
@@ -923,21 +936,45 @@ async function openPhoto(photoId, ids = null) {
 
 async function renderPhotoDialogContent() {
   if (!selectedPhotoId) return;
+  const token = ++currentViewerLoadToken;
+  const stage = document.querySelector('.photo-stage');
+  stage?.classList.add('is-loading');
   const photo = await dbGet('photos', selectedPhotoId);
-  if (!photo) return;
-  if (currentPreviewUrl) URL.revokeObjectURL(currentPreviewUrl);
-  if (!photo.blob && photo.remotePath) await repairPhotoFromCloud(photo.id);
-  const latest = await dbGet('photos', selectedPhotoId) || photo;
+  if (!photo || token !== currentViewerLoadToken) {
+    stage?.classList.remove('is-loading');
+    return;
+  }
+  if (currentPreviewUrl) {
+    URL.revokeObjectURL(currentPreviewUrl);
+    currentPreviewUrl = '';
+  }
+  let latest = photo;
+  if (!latest.blob && latest.remotePath) {
+    await repairPhotoFromCloud(latest.id);
+    latest = await dbGet('photos', selectedPhotoId) || photo;
+  }
+  if (!latest.blob) {
+    stage?.classList.remove('is-loading');
+    els.photoPreview.removeAttribute('src');
+    els.photoNote.value = latest.note || '';
+    els.photoMeta.textContent = '这张照片只有云端记录，本机还没有原图。请先同步云端，或检查 Worker / GitHub 文件是否可访问。';
+    return;
+  }
   currentPreviewUrl = URL.createObjectURL(normalizeImageBlob(latest.blob, latest.mime || guessMimeFromFilename(latest.filename)));
+  els.photoPreview.onload = () => stage?.classList.remove('is-loading');
+  els.photoPreview.onerror = () => {
+    stage?.classList.remove('is-loading');
+    els.photoMeta.textContent = '图片解码失败：本地缓存可能损坏。请点击同步，从云端重新拉取。';
+  };
   els.photoPreview.src = currentPreviewUrl;
   resetPhotoZoom();
-  els.photoNote.value = photo.note || '';
+  els.photoNote.value = latest.note || '';
   const total = photoViewerIds.length || 1;
   const humanIndex = selectedPhotoIndex >= 0 ? selectedPhotoIndex + 1 : 1;
   if (els.photoCounter) els.photoCounter.textContent = `${humanIndex} / ${total}`;
   for (const btn of [els.prevPhotoBtn, els.prevPhotoTextBtn]) if (btn) btn.disabled = total <= 1;
   for (const btn of [els.nextPhotoBtn, els.nextPhotoTextBtn]) if (btn) btn.disabled = total <= 1;
-  els.photoMeta.textContent = `状态：${photo.syncStatus} · 大小：${formatBytes(photo.size)} · 创建：${formatTs(photo.createdAt)}${photo.remoteSyncedAt ? ` · 已同步：${formatTs(photo.remoteSyncedAt)}` : ''}${photo.lastError ? ` · 错误：${photo.lastError}` : ''}`;
+  els.photoMeta.textContent = `状态：${latest.syncStatus} · 大小：${formatBytes(latest.size)} · 创建：${formatTs(latest.createdAt)}${latest.remoteSyncedAt ? ` · 已同步：${formatTs(latest.remoteSyncedAt)}` : ''}${latest.lastError ? ` · 错误：${latest.lastError}` : ''}`;
 }
 
 async function switchPhoto(delta) {
@@ -952,13 +989,23 @@ async function saveSelectedNote() {
   if (!selectedPhotoId) return;
   const photo = await dbGet('photos', selectedPhotoId);
   if (!photo) return;
-  photo.note = els.photoNote.value.trim();
+  const nextNote = els.photoNote.value.trim();
+  if ((photo.note || '') === nextNote) {
+    els.photoMeta.textContent = '备注没有变化。';
+    return;
+  }
+  photo.note = nextNote;
   photo.updatedAt = new Date().toISOString();
-  if (photo.syncStatus === 'synced') photo.syncStatus = 'pending';
+  if (photo.syncStatus === 'synced' && photo.remoteMetaPath) {
+    photo.syncStatus = 'metadataPending';
+    photo.lastError = '备注已修改，等待同步 metadata。';
+  } else if (!['pending', 'failed', 'cloudMissing'].includes(photo.syncStatus)) {
+    photo.syncStatus = 'pending';
+  }
   await dbPut('photos', photo);
-  try { els.photoDialog.close(); } catch {}
+  els.photoMeta.textContent = '备注已保存到本机，正在后台同步云端。';
   await render();
-  await syncNow(false);
+  syncNow(false).catch(err => console.warn('note background sync failed', err));
 }
 
 async function softDeleteSelectedPhoto() {
@@ -969,13 +1016,23 @@ async function softDeleteSelectedPhoto() {
     ? '这会在本地隐藏照片，并请求 Worker 删除 GitHub 里的对应文件。本地副本会先保留在回收站。继续？'
     : '这张照片尚未同步到 GitHub。本地会先放入回收站，不会立即物理删除。继续？';
   if (!confirm(warning)) return;
+  const deletedId = selectedPhotoId;
+  const deletedIndex = Math.max(0, selectedPhotoIndex);
   photo.deletedAt = new Date().toISOString();
   photo.updatedAt = photo.deletedAt;
   photo.syncStatus = photo.remotePath ? 'deletePending' : 'deletedLocal';
   await dbPut('photos', photo);
-  els.photoDialog.close();
+
+  photoViewerIds = photoViewerIds.filter(id => id !== deletedId);
   await render();
-  await syncNow(false);
+  if (photoViewerIds.length) {
+    selectedPhotoIndex = Math.min(deletedIndex, photoViewerIds.length - 1);
+    selectedPhotoId = photoViewerIds[selectedPhotoIndex];
+    await renderPhotoDialogContent();
+  } else {
+    try { els.photoDialog.close(); } catch {}
+  }
+  syncNow(false).catch(err => console.warn('delete background sync failed', err));
 }
 
 async function getSyncConfig() {
@@ -1033,7 +1090,7 @@ async function syncFoldersSafe() {
 }
 
 function isLocalChangePending(photo) {
-  return ['pending', 'failed', 'deletePending'].includes(photo.syncStatus) || Boolean(photo.previousRemotePath);
+  return ['pending', 'failed', 'deletePending', 'metadataPending', 'metadataFailed'].includes(photo.syncStatus) || Boolean(photo.previousRemotePath);
 }
 
 async function fetchCloudState(apiBase, appPassword) {
@@ -1292,6 +1349,8 @@ async function syncNow(showAlert = true) {
     for (const photo of photos) {
       if (['pending', 'failed', 'cloudMissing'].includes(photo.syncStatus)) {
         await uploadPhoto(photo, apiBase, appPassword);
+      } else if (['metadataPending', 'metadataFailed'].includes(photo.syncStatus)) {
+        await uploadPhotoMetadataOnly(photo, apiBase, appPassword);
       } else if (photo.syncStatus === 'deletePending') {
         await deleteRemotePhoto(photo, apiBase, appPassword);
       }
@@ -1322,6 +1381,8 @@ async function autoCloudSyncOnStartup() {
     for (const photo of photos) {
       if (['pending', 'failed', 'cloudMissing'].includes(photo.syncStatus)) {
         await uploadPhoto(photo, apiBase, appPassword);
+      } else if (['metadataPending', 'metadataFailed'].includes(photo.syncStatus)) {
+        await uploadPhotoMetadataOnly(photo, apiBase, appPassword);
       } else if (photo.syncStatus === 'deletePending') {
         await deleteRemotePhoto(photo, apiBase, appPassword);
       }
@@ -1388,6 +1449,30 @@ async function cleanupMovedRemotePhoto(photo, newRemotePath, newRemoteMetaPath, 
   const body = await safeJson(res);
   if (!res.ok) throw new Error(body?.error || body?.message || res.statusText || '清理旧 GitHub 路径失败');
 }
+async function uploadPhotoMetadataOnly(photo, apiBase, appPassword) {
+  const metadata = await buildPhotoMetadata(photo);
+  try {
+    const res = await fetchWithTimeout(`${apiBase}/metadata`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-app-password': appPassword },
+      body: JSON.stringify({ metadata })
+    }, 45000);
+    const body = await safeJson(res);
+    if (!res.ok) throw new Error(body?.error || body?.message || res.statusText);
+    photo.syncStatus = 'synced';
+    photo.remoteMetaPath = body.remoteMetaPath || metadata.remoteMetaPath;
+    photo.remoteSyncedAt = new Date().toISOString();
+    photo.lastError = '';
+    photo.retryCount = 0;
+    await dbPut('photos', photo);
+  } catch (err) {
+    photo.syncStatus = 'metadataFailed';
+    photo.retryCount = (photo.retryCount || 0) + 1;
+    photo.lastError = String(err.message || err).slice(0, 500);
+    await dbPut('photos', photo);
+  }
+}
+
 
 async function uploadPhoto(photo, apiBase, appPassword) {
   photo = await ensurePhotoThumbnail(photo, true);
@@ -1604,13 +1689,15 @@ async function init() {
   if (els.zoomOutBtn) els.zoomOutBtn.onclick = () => changePhotoZoom(-0.5);
   if (els.zoomResetBtn) els.zoomResetBtn.onclick = resetPhotoZoom;
   if (els.zoomInBtn) els.zoomInBtn.onclick = () => changePhotoZoom(0.5);
-  if (els.photoPreview) els.photoPreview.ondblclick = () => selectedPhotoId && openNativePhotoById(selectedPhotoId);
+  if (els.photoPreview) els.photoPreview.ondblclick = () => setPhotoZoom(photoZoom > 1.05 ? 1 : 2.5);
   installPhotoZoomHandlers();
   els.saveNoteBtn.onclick = saveSelectedNote;
   els.deletePhotoBtn.onclick = softDeleteSelectedPhoto;
 
   els.photoDialog.addEventListener('close', () => {
+    currentViewerLoadToken++;
     if (currentPreviewUrl) { URL.revokeObjectURL(currentPreviewUrl); currentPreviewUrl = ''; }
+    document.querySelector('.photo-stage')?.classList.remove('is-loading');
     selectedPhotoId = null;
     selectedPhotoIndex = -1;
     resetPhotoZoom();
