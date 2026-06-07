@@ -833,3 +833,11 @@ dialog::backdrop { background: rgba(0,0,0,.68); backdrop-filter: blur(4px); }
     margin: 0 auto;
   }
 }
+
+
+/* v10: remove floating up/down buttons in photo viewer. Keep swipe + bottom previous/next controls. */
+.photo-dialog-card.viewer-card .photo-nav,
+.photo-nav-up,
+.photo-nav-down {
+  display: none !important;
+}
