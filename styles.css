@@ -619,3 +619,6 @@ dialog::backdrop { background: rgba(0,0,0,.68); backdrop-filter: blur(4px); }
     display: none;
   }
 }
+
+.app-version { font-size: 0.42em; color: var(--muted); font-weight: 700; vertical-align: middle; }
+.photo-card img.broken { object-fit: contain; opacity: .65; background: rgba(255,255,255,.05); }

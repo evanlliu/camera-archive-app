@@ -129,6 +129,7 @@ async function handleUpload(request, env) {
 
   const form = await request.formData();
   const file = form.get('file');
+  const thumb = form.get('thumb');
   const metadataRaw = form.get('metadata');
   if (!file || typeof file === 'string') return corsResponse(env, { error: 'Missing file field' }, 400, request);
   if (!metadataRaw || typeof metadataRaw !== 'string') return corsResponse(env, { error: 'Missing metadata field' }, 400, request);
@@ -142,31 +143,42 @@ async function handleUpload(request, env) {
 
   const remotePath = normalizeRepoPath(metadata.remotePath);
   const remoteMetaPath = normalizeRepoPath(metadata.remoteMetaPath || `${remotePath}.json`);
+  let remoteThumbPath = '';
   const now = new Date().toISOString();
+
+  const imageBuffer = await file.arrayBuffer();
+  await putOrUpdateFile(env, remotePath, imageBuffer, `Upload photo ${metadata.id}`);
+
+  if (thumb && typeof thumb !== 'string' && thumb.size > 0) {
+    remoteThumbPath = normalizeRepoPath(metadata.remoteThumbPath || `${remotePath}.thumb.jpg`);
+    const thumbBuffer = await thumb.arrayBuffer();
+    await putOrUpdateFile(env, remoteThumbPath, thumbBuffer, `Upload thumbnail ${metadata.id}`);
+  }
+
   const finalMetadata = {
     ...metadata,
     remotePath,
     remoteMetaPath,
+    remoteThumbPath,
     uploadedAt: now,
-    workerVersion: 1
+    workerVersion: 3
   };
 
-  const imageBuffer = await file.arrayBuffer();
-  await putOrUpdateFile(env, remotePath, imageBuffer, `Upload photo ${metadata.id}`);
   await putOrUpdateFile(env, remoteMetaPath, JSON.stringify(finalMetadata, null, 2), `Upload metadata ${metadata.id}`);
 
-  return corsResponse(env, { ok: true, remotePath, remoteMetaPath, uploadedAt: now }, 200, request);
+  return corsResponse(env, { ok: true, remotePath, remoteMetaPath, remoteThumbPath, uploadedAt: now }, 200, request);
 }
 
 async function handleDeletePhoto(request, env) {
   const body = await request.json();
   const remotePath = normalizeRepoPath(body.remotePath || '');
   const remoteMetaPath = normalizeRepoPath(body.remoteMetaPath || `${remotePath}.json`);
+  const remoteThumbPath = normalizeRepoPath(body.remoteThumbPath || `${remotePath}.thumb.jpg`);
   if (!remotePath) return corsResponse(env, { error: 'remotePath required' }, 400, request);
 
   const deleted = [];
   const missing = [];
-  for (const path of [remoteMetaPath, remotePath]) {
+  for (const path of [remoteMetaPath, remoteThumbPath, remotePath]) {
     const result = await deleteFileIfExists(env, path, `Delete ${path}`);
     if (result === 'deleted') deleted.push(path);
     if (result === 'missing') missing.push(path);
@@ -176,6 +188,7 @@ async function handleDeletePhoto(request, env) {
     id: body.id || '',
     remotePath,
     remoteMetaPath,
+    remoteThumbPath,
     deletedAt: body.deletedAt || new Date().toISOString(),
     deletedBy: 'camera-archive-app',
     workerVersion: 2
@@ -190,15 +203,17 @@ async function handleCleanupMovedPhoto(request, env) {
   const body = await request.json();
   const oldRemotePath = normalizeRepoPath(body.oldRemotePath || '');
   const oldRemoteMetaPath = normalizeRepoPath(body.oldRemoteMetaPath || `${oldRemotePath}.json`);
+  const oldRemoteThumbPath = normalizeRepoPath(body.oldRemoteThumbPath || `${oldRemotePath}.thumb.jpg`);
   const newRemotePath = normalizeRepoPath(body.newRemotePath || '');
   const newRemoteMetaPath = normalizeRepoPath(body.newRemoteMetaPath || `${newRemotePath}.json`);
+  const newRemoteThumbPath = normalizeRepoPath(body.newRemoteThumbPath || `${newRemotePath}.thumb.jpg`);
   if (!oldRemotePath) return corsResponse(env, { error: 'oldRemotePath required' }, 400, request);
 
   const deleted = [];
   const missing = [];
   const skipped = [];
-  for (const path of [oldRemoteMetaPath, oldRemotePath]) {
-    if (!path || path === newRemotePath || path === newRemoteMetaPath) {
+  for (const path of [oldRemoteMetaPath, oldRemoteThumbPath, oldRemotePath]) {
+    if (!path || path === newRemotePath || path === newRemoteMetaPath || path === newRemoteThumbPath) {
       skipped.push(path);
       continue;
     }
@@ -237,7 +252,7 @@ async function handleRemoteIndex(request, env) {
   const json = await res.json();
   if (!res.ok) return corsResponse(env, json, res.status, request);
   const files = (json.tree || [])
-    .filter(x => x.type === 'blob' && (x.path.endsWith('.jpg') || x.path.endsWith('.jpeg') || x.path.endsWith('.png') || x.path.endsWith('.heic') || x.path.endsWith('.json')))
+    .filter(x => x.type === 'blob' && (x.path.endsWith('.jpg') || x.path.endsWith('.jpeg') || x.path.endsWith('.png') || x.path.endsWith('.webp') || x.path.endsWith('.heic') || x.path.endsWith('.heif') || x.path.endsWith('.json')))
     .map(x => ({ path: x.path, size: x.size, sha: x.sha }));
   return corsResponse(env, { ok: true, files }, 200, request);
 }

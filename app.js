@@ -281,6 +281,33 @@ function blobToDataUrl(blob) {
   });
 }
 
+function dataUrlToBlob(dataUrl) {
+  const [header, base64] = String(dataUrl || '').split(',');
+  if (!header || !base64) return null;
+  const mime = (header.match(/data:([^;]+)/) || [])[1] || 'image/jpeg';
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return new Blob([bytes], { type: mime });
+}
+
+function normalizeImageBlob(blob, mime = '') {
+  if (!blob) return null;
+  const type = blob.type || mime || 'image/jpeg';
+  if (blob.type === type) return blob;
+  return new Blob([blob], { type });
+}
+
+function guessMimeFromFilename(filename = '') {
+  const lower = String(filename).toLowerCase();
+  if (lower.endsWith('.png')) return 'image/png';
+  if (lower.endsWith('.gif')) return 'image/gif';
+  if (lower.endsWith('.webp')) return 'image/webp';
+  if (lower.endsWith('.heic')) return 'image/heic';
+  if (lower.endsWith('.heif')) return 'image/heif';
+  return 'image/jpeg';
+}
+
 async function makeThumbnail(blob) {
   const dataUrl = await blobToDataUrl(blob);
   const img = await new Promise((resolve, reject) => {
@@ -296,6 +323,80 @@ async function makeThumbnail(blob) {
   const ctx = canvas.getContext('2d');
   ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
   return await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.72));
+}
+
+async function ensurePhotoThumbnail(photo, shouldPersist = true) {
+  if (!photo) return photo;
+  if (photo.thumbDataUrl && photo.thumbDataUrl.startsWith('data:image/')) return photo;
+
+  let changed = false;
+  if (!photo.thumbBlob && photo.blob) {
+    try {
+      const source = normalizeImageBlob(photo.blob, photo.mime || guessMimeFromFilename(photo.filename));
+      photo.thumbBlob = await makeThumbnail(source);
+      changed = true;
+    } catch (err) {
+      console.warn('thumbnail regeneration failed', photo.id, err);
+    }
+  }
+
+  if (photo.thumbBlob) {
+    try {
+      photo.thumbBlob = normalizeImageBlob(photo.thumbBlob, 'image/jpeg');
+      photo.thumbDataUrl = await blobToDataUrl(photo.thumbBlob);
+      changed = true;
+    } catch (err) {
+      console.warn('thumbnail data url failed', photo.id, err);
+    }
+  }
+
+  if (changed && shouldPersist) {
+    photo.updatedAt = photo.updatedAt || new Date().toISOString();
+    try { await dbPut('photos', photo); } catch (err) { console.warn('persist thumbnail failed', err); }
+  }
+  return photo;
+}
+
+async function getPhotoDisplaySource(photo) {
+  await ensurePhotoThumbnail(photo, true);
+  if (photo.thumbDataUrl) return { src: photo.thumbDataUrl, kind: 'thumbDataUrl' };
+  if (photo.thumbBlob) {
+    const url = URL.createObjectURL(normalizeImageBlob(photo.thumbBlob, 'image/jpeg'));
+    lastObjectUrls.push(url);
+    return { src: url, kind: 'thumbBlob' };
+  }
+  if (photo.blob) {
+    const url = URL.createObjectURL(normalizeImageBlob(photo.blob, photo.mime || guessMimeFromFilename(photo.filename)));
+    lastObjectUrls.push(url);
+    return { src: url, kind: 'originalBlob' };
+  }
+  return { src: '', kind: 'missing' };
+}
+
+async function repairPhotoFromCloud(photoId) {
+  const photo = await dbGet('photos', photoId);
+  if (!photo?.remotePath) return false;
+  const { apiBase, appPassword } = await getSyncConfig();
+  if (!apiBase || !appPassword) return false;
+  try {
+    const metaMime = photo.mime || guessMimeFromFilename(photo.filename || photo.remotePath);
+    const blob = normalizeImageBlob(await downloadCloudFile(apiBase, appPassword, photo.remotePath), metaMime);
+    photo.blob = blob;
+    photo.mime = blob.type || metaMime;
+    photo.size = blob.size || photo.size || 0;
+    photo.thumbBlob = null;
+    photo.thumbDataUrl = '';
+    await ensurePhotoThumbnail(photo, false);
+    photo.lastError = '';
+    if (photo.syncStatus === 'cloudMissing') photo.syncStatus = 'synced';
+    await dbPut('photos', photo);
+    return true;
+  } catch (err) {
+    console.warn('repair cloud photo failed', err);
+    photo.lastError = `图片重新下载失败：${err.message || err}`;
+    await dbPut('photos', photo);
+    return false;
+  }
 }
 
 async function updateStorageLine() {
@@ -439,9 +540,6 @@ async function renderPhotos(photos = null) {
   for (const photo of photos) {
     const btn = document.createElement('button');
     btn.className = 'photo-card';
-    const blob = photo.thumbBlob || photo.blob;
-    const url = URL.createObjectURL(blob);
-    lastObjectUrls.push(url);
     const badgeClass = photo.syncStatus === 'synced' ? 'synced' : photo.syncStatus === 'failed' ? 'failed' : 'pending';
     const badgeText = photo.syncStatus === 'synced' ? '已同步'
       : photo.syncStatus === 'failed' ? '失败'
@@ -450,7 +548,28 @@ async function renderPhotos(photos = null) {
       : '待同步';
     const img = document.createElement('img');
     img.alt = '照片';
-    img.src = url;
+    img.loading = 'lazy';
+    const display = await getPhotoDisplaySource(photo);
+    img.onerror = async () => {
+      img.onerror = null;
+      img.classList.add('broken');
+      img.alt = '图片加载失败，正在尝试修复';
+      const repaired = await repairPhotoFromCloud(photo.id);
+      if (repaired) {
+        const latest = await dbGet('photos', photo.id);
+        const next = await getPhotoDisplaySource(latest);
+        if (next.src) {
+          img.classList.remove('broken');
+          img.alt = '照片';
+          img.onerror = () => {
+            img.classList.add('broken');
+            img.alt = '图片仍无法显示，请导出 ZIP 或重新同步';
+          };
+          img.src = next.src;
+        }
+      }
+    };
+    if (display.src) img.src = display.src;
     const badge = document.createElement('span');
     badge.className = `badge ${badgeClass}`;
     badge.textContent = badgeText;
@@ -473,12 +592,12 @@ async function renderPhotos(photos = null) {
     btn.addEventListener('pointerup', clearLongPress);
     btn.addEventListener('pointercancel', clearLongPress);
     btn.addEventListener('pointerleave', clearLongPress);
-    btn.onclick = () => {
+    btn.onclick = async () => {
       if (longPressOpened) {
         longPressOpened = false;
         return;
       }
-      openNativePhoto(photo);
+      await openNativePhoto(photo);
     };
     els.photoGrid.append(btn);
   }
@@ -524,8 +643,10 @@ async function renameFolder(folderId) {
   for (const photo of photosToMove) {
     if (!photo.previousRemotePath) photo.previousRemotePath = photo.remotePath;
     if (!photo.previousRemoteMetaPath) photo.previousRemoteMetaPath = photo.remoteMetaPath || `${photo.remotePath}.json`;
+    if (!photo.previousRemoteThumbPath) photo.previousRemoteThumbPath = photo.remoteThumbPath || `${photo.remotePath}.thumb.jpg`;
     photo.remotePath = '';
     photo.remoteMetaPath = '';
+    photo.remoteThumbPath = '';
     photo.remoteSyncedAt = null;
     photo.syncStatus = 'pending';
     photo.updatedAt = now;
@@ -569,8 +690,10 @@ async function handleCapture(file) {
   try {
     const hash = await sha256Hex(file);
     let thumbBlob = null;
+    let thumbDataUrl = '';
     try {
       thumbBlob = await makeThumbnail(file);
+      if (thumbBlob) thumbDataUrl = await blobToDataUrl(thumbBlob);
     } catch (thumbErr) {
       console.warn('thumbnail failed; original photo is still saved', thumbErr);
     }
@@ -578,8 +701,9 @@ async function handleCapture(file) {
       id,
       folderId: currentFolderId,
       filename,
-      blob: file,
+      blob: normalizeImageBlob(file, file.type || 'image/jpeg'),
       thumbBlob,
+      thumbDataUrl,
       mime: file.type || 'image/jpeg',
       size: file.size,
       sha256: hash,
@@ -615,12 +739,16 @@ function setBusy(isBusy, label = '') {
 }
 
 
-function openNativePhoto(photo) {
+async function openNativePhoto(photo) {
+  if (!photo?.blob && photo?.remotePath) {
+    const repaired = await repairPhotoFromCloud(photo.id);
+    if (repaired) photo = await dbGet('photos', photo.id);
+  }
   if (!photo?.blob) {
     alert('这张照片还没有下载到本机，先同步云端后再打开。');
     return;
   }
-  const url = URL.createObjectURL(photo.blob);
+  const url = URL.createObjectURL(normalizeImageBlob(photo.blob, photo.mime || guessMimeFromFilename(photo.filename)));
   const opened = window.open(url, '_blank', 'noopener,noreferrer');
   if (!opened) {
     const a = document.createElement('a');
@@ -639,7 +767,7 @@ function openNativePhoto(photo) {
 async function openNativePhotoById(photoId) {
   const photo = await dbGet('photos', photoId);
   if (!photo) return;
-  openNativePhoto(photo);
+  await openNativePhoto(photo);
 }
 
 
@@ -798,7 +926,9 @@ async function renderPhotoDialogContent() {
   const photo = await dbGet('photos', selectedPhotoId);
   if (!photo) return;
   if (currentPreviewUrl) URL.revokeObjectURL(currentPreviewUrl);
-  currentPreviewUrl = URL.createObjectURL(photo.blob);
+  if (!photo.blob && photo.remotePath) await repairPhotoFromCloud(photo.id);
+  const latest = await dbGet('photos', selectedPhotoId) || photo;
+  currentPreviewUrl = URL.createObjectURL(normalizeImageBlob(latest.blob, latest.mime || guessMimeFromFilename(latest.filename)));
   els.photoPreview.src = currentPreviewUrl;
   resetPhotoZoom();
   els.photoNote.value = photo.note || '';
@@ -928,6 +1058,11 @@ async function downloadCloudFile(apiBase, appPassword, remotePath) {
   return res.blob();
 }
 
+async function downloadCloudImageFile(apiBase, appPassword, remotePath, mime = '') {
+  const blob = await downloadCloudFile(apiBase, appPassword, remotePath);
+  return normalizeImageBlob(blob, mime || guessMimeFromFilename(remotePath));
+}
+
 async function mergeRemoteFolders(folders = []) {
   await ensureRootFolder();
   const localFolders = await dbAll('folders');
@@ -1004,11 +1139,34 @@ async function mergeRemotePhotos(remotePhotos = [], deletions = [], apiBase, app
 
     let blob = local?.blob || null;
     let thumbBlob = local?.thumbBlob || null;
+    let thumbDataUrl = local?.thumbDataUrl || '';
+    const metaMime = meta.mime || local?.mime || guessMimeFromFilename(meta.filename || meta.remotePath);
     const sameHash = local?.sha256 && meta.sha256 && String(local.sha256).toLowerCase() === String(meta.sha256).toLowerCase();
+
+    // 优先加载云端缩略图，缩略图用于列表展示，避免每次都依赖大图解码。
+    if (meta.remoteThumbPath && !thumbDataUrl) {
+      try {
+        thumbBlob = await downloadCloudImageFile(apiBase, appPassword, meta.remoteThumbPath, 'image/jpeg');
+        thumbDataUrl = await blobToDataUrl(thumbBlob);
+      } catch (err) {
+        console.warn('download remote thumbnail failed', meta.id, err);
+      }
+    }
+
     if (!blob || !sameHash) {
-      blob = await downloadCloudFile(apiBase, appPassword, meta.remotePath);
+      blob = await downloadCloudImageFile(apiBase, appPassword, meta.remotePath, metaMime);
       downloaded++;
-      try { thumbBlob = await makeThumbnail(blob); } catch { thumbBlob = null; }
+    } else {
+      blob = normalizeImageBlob(blob, metaMime);
+    }
+
+    if (!thumbDataUrl && blob) {
+      try {
+        thumbBlob = await makeThumbnail(blob);
+        thumbDataUrl = thumbBlob ? await blobToDataUrl(thumbBlob) : '';
+      } catch (err) {
+        console.warn('make cloud thumbnail failed', meta.id, err);
+      }
     }
 
     const now = new Date().toISOString();
@@ -1019,6 +1177,7 @@ async function mergeRemotePhotos(remotePhotos = [], deletions = [], apiBase, app
       filename: meta.filename || local?.filename || meta.remotePath.split('/').pop(),
       blob,
       thumbBlob,
+      thumbDataUrl,
       mime: meta.mime || blob.type || local?.mime || 'image/jpeg',
       size: meta.size || blob.size || local?.size || 0,
       sha256: meta.sha256 || local?.sha256 || '',
@@ -1031,6 +1190,7 @@ async function mergeRemotePhotos(remotePhotos = [], deletions = [], apiBase, app
       lastError: '',
       remotePath: meta.remotePath,
       remoteMetaPath: meta.remoteMetaPath || `${meta.remotePath}.json`,
+      remoteThumbPath: meta.remoteThumbPath || local?.remoteThumbPath || '',
       remoteSyncedAt: meta.uploadedAt || local?.remoteSyncedAt || now,
       deletedAt: null
     });
@@ -1188,6 +1348,7 @@ async function buildPhotoMetadata(photo) {
   const remoteDir = safePath ? `photos/${yyyy}/${mm}/${safePath}` : `photos/${yyyy}/${mm}/未分类`;
   const remotePath = photo.remotePath || `${remoteDir}/${safeSegment(photo.filename)}`;
   const remoteMetaPath = photo.remoteMetaPath || `${remotePath}.json`;
+  const remoteThumbPath = photo.remoteThumbPath || `${remotePath}.thumb.jpg`;
   return {
     id: photo.id,
     folderId: photo.folderId,
@@ -1201,6 +1362,7 @@ async function buildPhotoMetadata(photo) {
     updatedAt: photo.updatedAt,
     remotePath,
     remoteMetaPath,
+    remoteThumbPath,
     app: 'camera-archive-app',
     version: 1
   };
@@ -1217,8 +1379,10 @@ async function cleanupMovedRemotePhoto(photo, newRemotePath, newRemoteMetaPath, 
       id: photo.id,
       oldRemotePath,
       oldRemoteMetaPath: photo.previousRemoteMetaPath || `${oldRemotePath}.json`,
+      oldRemoteThumbPath: photo.previousRemoteThumbPath || `${oldRemotePath}.thumb.jpg`,
       newRemotePath,
-      newRemoteMetaPath
+      newRemoteMetaPath,
+      newRemoteThumbPath: photo.remoteThumbPath || `${newRemotePath}.thumb.jpg`
     })
   }, 60000);
   const body = await safeJson(res);
@@ -1226,9 +1390,11 @@ async function cleanupMovedRemotePhoto(photo, newRemotePath, newRemoteMetaPath, 
 }
 
 async function uploadPhoto(photo, apiBase, appPassword) {
+  photo = await ensurePhotoThumbnail(photo, true);
   const metadata = await buildPhotoMetadata(photo);
   const fd = new FormData();
-  fd.append('file', photo.blob, photo.filename);
+  fd.append('file', normalizeImageBlob(photo.blob, photo.mime || guessMimeFromFilename(photo.filename)), photo.filename);
+  if (photo.thumbBlob) fd.append('thumb', normalizeImageBlob(photo.thumbBlob, 'image/jpeg'), `${photo.id}.thumb.jpg`);
   fd.append('metadata', JSON.stringify(metadata));
   try {
     const res = await fetchWithTimeout(`${apiBase}/upload`, {
@@ -1244,11 +1410,13 @@ async function uploadPhoto(photo, apiBase, appPassword) {
     photo.syncStatus = 'synced';
     photo.remotePath = body.remotePath;
     photo.remoteMetaPath = body.remoteMetaPath;
+    photo.remoteThumbPath = body.remoteThumbPath || photo.remoteThumbPath || '';
     photo.remoteSyncedAt = new Date().toISOString();
     photo.lastError = '';
     photo.retryCount = 0;
     delete photo.previousRemotePath;
     delete photo.previousRemoteMetaPath;
+    delete photo.previousRemoteThumbPath;
     await dbPut('photos', photo);
   } catch (err) {
     photo.syncStatus = 'failed';
@@ -1268,7 +1436,7 @@ async function deleteRemotePhoto(photo, apiBase, appPassword) {
     const res = await fetchWithTimeout(`${apiBase}/photo`, {
       method: 'DELETE',
       headers: { 'content-type': 'application/json', 'x-app-password': appPassword },
-      body: JSON.stringify({ id: photo.id, remotePath: photo.remotePath, remoteMetaPath: photo.remoteMetaPath, deletedAt: new Date().toISOString() })
+      body: JSON.stringify({ id: photo.id, remotePath: photo.remotePath, remoteMetaPath: photo.remoteMetaPath, remoteThumbPath: photo.remoteThumbPath, deletedAt: new Date().toISOString() })
     });
     const body = await safeJson(res);
     if (!res.ok) throw new Error(body?.error || body?.message || res.statusText);
@@ -1364,8 +1532,16 @@ async function importZip(file) {
       if (await dbGet('photos', item.id)) continue;
       const entry = zip.file(item.zipPath);
       if (!entry) continue;
-      const blob = await entry.async('blob');
-      const thumbBlob = await makeThumbnail(blob);
+      const rawBlob = await entry.async('blob');
+      const blob = normalizeImageBlob(rawBlob, item.mime || guessMimeFromFilename(item.filename || item.zipPath));
+      let thumbBlob = null;
+      let thumbDataUrl = '';
+      try {
+        thumbBlob = await makeThumbnail(blob);
+        if (thumbBlob) thumbDataUrl = await blobToDataUrl(thumbBlob);
+      } catch (err) {
+        console.warn('import thumbnail failed', err);
+      }
       const hash = await sha256Hex(blob);
       await dbPut('photos', {
         id: item.id,
@@ -1373,6 +1549,7 @@ async function importZip(file) {
         filename: item.filename || item.zipPath.split('/').pop(),
         blob,
         thumbBlob,
+        thumbDataUrl,
         mime: item.mime || blob.type || 'image/jpeg',
         size: item.size || blob.size,
         sha256: item.sha256 || hash,
@@ -1385,6 +1562,7 @@ async function importZip(file) {
         lastError: '',
         remotePath: item.remotePath || '',
         remoteMetaPath: item.remoteMetaPath || '',
+        remoteThumbPath: item.remoteThumbPath || '',
         remoteSyncedAt: item.remotePath ? new Date().toISOString() : null,
         deletedAt: null
       });
