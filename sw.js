@@ -1,4 +1,4 @@
-const CACHE_NAME = 'camera-archive-app-static-cloud-v11';
+const CACHE_NAME = 'camera-archive-app-static-cloud-v12';
 const CORE_ASSETS = [
   './',
   './index.html',
@@ -12,7 +12,7 @@ const CORE_ASSETS = [
 self.addEventListener('install', (event) => {
   event.waitUntil(
     caches.open(CACHE_NAME)
-      .then(cache => cache.addAll(CORE_ASSETS.map(url => `${url}?v=11`).filter(url => !url.startsWith('./?'))).catch(() => null))
+      .then(cache => cache.addAll(CORE_ASSETS.map(url => `${url}?v=12`).filter(url => !url.startsWith('./?'))).catch(() => null))
       .then(() => self.skipWaiting())
   );
 });
