@@ -922,6 +922,44 @@ function installPhotoZoomHandlers() {
   }, { passive: false });
 }
 
+
+function installAppPageZoomGuard() {
+  // iOS Safari / PWA 会把双指手势默认解释为“整个页面缩放”。
+  // 照片查看器打开时，禁止浏览器原生页面缩放，只保留我们自己对图片的缩放逻辑。
+  if (window.__sceneCameraZoomGuardInstalled) return;
+  window.__sceneCameraZoomGuardInstalled = true;
+
+  const shouldBlockNativeZoom = (event) => {
+    // 只在照片查看器打开时拦截，普通页面仍保持正常点击/滚动。
+    return Boolean(els.photoDialog?.open);
+  };
+
+  const preventNativeZoom = (event) => {
+    if (shouldBlockNativeZoom(event)) event.preventDefault();
+  };
+
+  // Safari 专有的手势事件：这是阻止“整个页面被捏合放大”的关键。
+  for (const name of ['gesturestart', 'gesturechange', 'gestureend']) {
+    document.addEventListener(name, preventNativeZoom, { passive: false });
+  }
+
+  // 兜底：照片查看器打开时，双指移动不交给页面处理，避免页面跟着缩放/漂移。
+  document.addEventListener('touchmove', (event) => {
+    if (shouldBlockNativeZoom(event) && event.touches && event.touches.length > 1) {
+      event.preventDefault();
+    }
+  }, { passive: false });
+
+  // 防止 iOS 双击快速点按造成页面局部放大；图片本身的双击缩放由 photoPreview.ondblclick 处理。
+  let lastTouchEndAt = 0;
+  document.addEventListener('touchend', (event) => {
+    if (!shouldBlockNativeZoom(event)) return;
+    const now = Date.now();
+    if (now - lastTouchEndAt < 300) event.preventDefault();
+    lastTouchEndAt = now;
+  }, { passive: false });
+}
+
 async function openPhoto(photoId, ids = null) {
   if (Array.isArray(ids) && ids.length) photoViewerIds = ids.slice();
   if (!photoViewerIds.includes(photoId)) {
@@ -1691,6 +1729,7 @@ async function init() {
   if (els.zoomInBtn) els.zoomInBtn.onclick = () => changePhotoZoom(0.5);
   if (els.photoPreview) els.photoPreview.ondblclick = () => setPhotoZoom(photoZoom > 1.05 ? 1 : 2.5);
   installPhotoZoomHandlers();
+  installAppPageZoomGuard();
   els.saveNoteBtn.onclick = saveSelectedNote;
   els.deletePhotoBtn.onclick = softDeleteSelectedPhoto;
 

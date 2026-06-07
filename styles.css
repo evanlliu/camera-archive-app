@@ -23,7 +23,7 @@
 }
 
 * { box-sizing: border-box; }
-html, body { margin: 0; padding: 0; min-height: 100%; }
+html, body { margin: 0; padding: 0; min-height: 100%; touch-action: manipulation; }
 html { background: var(--bg); }
 body {
   padding: env(safe-area-inset-top) 0 max(env(safe-area-inset-bottom), 10px);
@@ -840,4 +840,16 @@ dialog::backdrop { background: rgba(0,0,0,.68); backdrop-filter: blur(4px); }
 .photo-nav-up,
 .photo-nav-down {
   display: none !important;
+}
+
+
+/* v11: disable browser/page zoom while photo viewer handles pinch itself. */
+.photo-dialog.viewer-dialog[open],
+.photo-dialog.viewer-dialog[open] * {
+  -webkit-user-select: none;
+  user-select: none;
+}
+.photo-dialog.viewer-dialog[open] textarea {
+  -webkit-user-select: text;
+  user-select: text;
 }
